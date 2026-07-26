@@ -51,6 +51,12 @@ OBS
    sudo ./start.sh
    ```
 
+如果使用 GitHub 自动生成的源码归档而不是 Releases 中的完整包，请先恢复脚本执行权限：
+
+```sh
+chmod +x start.sh stop.sh status.sh diagnose.sh
+```
+
 `WHIP_IP` 留空时会自动选择已启用的 RFC1918 私网网卡。多网卡服务器可以填写
 某个本机私网地址；`INGEST_ALLOW_CIDRS` 是旧版兼容项，手工值会被忽略。
 
