@@ -1,0 +1,23 @@
+DNS 配置
+========
+
+现在不再要求 QUIC-only，因此普通 A / AAAA 记录即可。
+
+示例：
+  live.example.com. 300 IN A 203.0.113.10
+
+有 IPv6：
+  live.example.com. 300 IN AAAA 2001:db8::10
+
+HTTP/3 / HTTPS RR
+-----------------
+HTTPS/SVCB RR 不再是必须项。
+
+支持它的 DNS 服务商可以额外发布 HTTP/3 能力以优化首次连接，但即使不配置，
+浏览器仍可先通过 TCP/443 的 HTTP/2/HTTP/1.1 连接。
+
+本包始终同时提供：
+  TCP/443：HTTP/1.1 + HTTP/2
+  UDP/443：HTTP/3 / QUIC
+
+且两条路径都只允许 TLS 1.3。

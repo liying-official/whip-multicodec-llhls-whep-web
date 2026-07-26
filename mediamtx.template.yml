@@ -1,0 +1,74 @@
+logLevel: info
+readTimeout: 30s
+writeTimeout: 30s
+
+# 每次启动随机生成 OBS 发布密码；磁盘中只保存 SHA-256 哈希。
+authMethod: internal
+authInternalUsers:
+  - user: obs
+    pass: "__PUBLISH_PASS_HASH__"
+    # Password and source IP must both match. This is an application-level
+    # fail-closed boundary even if an upstream firewall is misconfigured.
+    ips: __PUBLISH_IPS__
+    permissions:
+      - action: publish
+        path: live
+
+  # 网页/HLS 匿名观看。
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+        path: live
+
+# OBS -> MediaMTX: WHIP / WebRTC
+# 视频原样通过：H.264 / H.265(HEVC) / AV1；音频通常为 Opus。
+webrtc: true
+# WHIP 信令只绑定指定的 RFC1918 网卡 IPv4，不监听公网/其他网卡。
+webrtcAddress: "__INGEST_IP__:8889"
+webrtcEncryption: false
+webrtcAllowOrigins: []
+webrtcLocalUDPAddress: :8189
+# TCP media fallback helps software encoders and WHEP viewers on networks that block UDP.
+webrtcLocalTCPAddress: :8189
+webrtcAdditionalHosts: __WEBRTC_ADDITIONAL_HOSTS__
+# The upstream default is 2s. 4K software x264/SVT-AV1 can take longer to emit
+# the first RTP frame, which otherwise makes MediaMTX close a valid WHIP session.
+webrtcTrackGatherTimeout: 15s
+
+# MediaMTX -> 本机统一 8080 网关：Low-Latency HLS。
+# 8888 仅监听 loopback，不对局域网/公网暴露。
+hls: true
+hlsAddress: 127.0.0.1:8888
+hlsEncryption: false
+hlsAllowOrigins: []
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
+
+# 服务器保留约 15 个 1s 分片；客户端目标直播延迟约 5 秒。
+hlsSegmentCount: 15
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsDirectory: ""
+hlsMuxerCloseAfter: 60s
+
+# 本方案不需要的服务。
+rtsp: false
+# Compatibility ingest for encoders that use frame reordering or cannot emit
+# their first WebRTC frame quickly enough. MediaMTX recommends RTMP for OBS.
+rtmp: true
+rtmpEncryption: "no"
+rtmpAddress: "__INGEST_IP__:1935"
+srt: false
+moq: false
+api: false
+metrics: false
+pprof: false
+playback: false
+
+paths:
+  live:
+    source: publisher
+    record: false

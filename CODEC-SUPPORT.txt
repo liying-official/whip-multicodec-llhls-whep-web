@@ -1,0 +1,59 @@
+编码与传输兼容性
+================
+
+服务器端不进行视频转码。
+
+视频：
+  H.264 / AVC
+  H.265 / HEVC
+  AV1
+
+音频：
+  Opus（WHIP / WHEP）
+  AAC 等 OBS RTMP 实际协商的受支持音频（用于 LL-HLS）
+
+重要限制：
+  WebRTC/WHEP 支持 Opus，不支持 AAC。OBS 通过 WHIP 推流通常是 Opus，可在网页
+  点“开启声音”后播放；OBS 通过 RTMP 推流通常是 AAC，WHEP 可能只有视频，需使用
+  LL-HLS。此包不做音频转码。
+
+推流入口（仅启动识别出的同网段局域网和服务器本机）：
+  WHIP  http://<网卡IP>:8889/live/whip
+  RTMP  rtmp://<网卡IP>:1935
+
+8889/1935 只绑定启动识别出的 WHIP_IP；发布账号同时检查随机密码和该网卡
+的真实局域网段 + WHIP_IP/32 本机地址。公网网页不会代理 /live/whip。公网 WHEP 使用 443 信令以及可选的
+UDP/TCP 8189 加密媒体，不会扩大发布权限。
+
+WHIP / WebRTC 限制：
+  - H.264 B 帧不属于 WebRTC 兼容负载，必须关闭 B 帧。
+  - OBS 32.2.1 的 WHIP 服务会为 x264 请求 bf=0 和 repeat_headers。
+  - OBS 32.2.1 的 SVT-AV1 只有在 CBR 下才应用 low-delay P 预测结构。
+  - 软件编码器首帧可能很慢；本包把服务器等待从上游默认 2 秒提高到 15 秒。
+  - AOM AV1 的关键帧间隔必须为 1～2 秒，不能使用 0/自动；否则 HLS 无法形成独立分片。
+  - MediaMTX v1.19.3-r8 会归一化 AV1 OBU，并只在真实 KEY_FRAME 前恢复缓存的序列头。
+
+RTMP 兼容入口：
+  - 当 x264/SVT-AV1 在 WHIP 下仍自动断开时使用。
+  - 可容纳不适合 WebRTC 的帧重排/时间戳结构。
+  - 本包随附 MediaMTX v1.19.3-r8：AOM AV1/Enhanced RTMP 在真正的 av1C
+    到达前发送空 sequence-start 时会等待后续配置，不再以 EOF 断开。
+  - 不会解决 OBS 本机 CPU 不足或编码队列超过 5 秒的问题。
+
+网页输出：
+  H.264 / HEVC  -> 默认 Low-Latency HLS / CMAF
+  AV1 + AAC     -> 浏览器支持 MSE AV1 时优先 LL-HLS，保留声音
+  AV1 + Opus    -> 可使用 WHEP / WebRTC
+  AV1 无 MSE    -> 自动回退 WHEP / WebRTC
+  HLS 连续 5xx  -> 自动回退 WHEP / WebRTC（手动 HLS 仍可诊断）
+
+网页从 HLS manifest 识别：
+  avc1 / avc3 -> H.264
+  hvc1 / hev1 -> HEVC
+  av01        -> AV1
+  mp4a        -> AAC
+  opus        -> Opus
+
+右上角可手动选择“LL-HLS”或“WebRTC / AV1”。客户端仍必须具备当前编码的
+解码能力；若无画面/声音，网页会显示具体的 HLS、MSE、HTTP、WebRTC、静音、
+缺少音频轨或 AAC/WHEP 不兼容信息。

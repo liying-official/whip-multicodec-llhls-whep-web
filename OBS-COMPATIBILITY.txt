@@ -1,0 +1,135 @@
+OBS 32.2.1 软件编码器兼容配置
+============================
+
+推流地址不绑定域名。以下地址中的 <网卡IP> 是 Debian 13 服务器监听 OBS 流量的
+IPv4，例如 192.168.1.10。TCP/8889 和 TCP/1935 只绑定该地址，不监听
+0.0.0.0 或公网 IPv6。每次启动会读取该网卡的真实掩码，发布来源只允许该
+局域网网段和服务器本机 /32。
+
+config.env 示例（推荐自动识别）：
+  WHIP_IP=
+  INGEST_ALLOW_CIDRS=
+
+程序优先选择默认路由对应的已启用 RFC1918 网卡；多网卡时可用 WHIP_IP 指定
+某个本机私网地址。INGEST_ALLOW_CIDRS 是旧版兼容项，手工值会被忽略。
+
+一、WHIP（首选）
+----------------
+
+服务：
+  WHIP
+
+Server：
+  http://<网卡IP>:8889/live/whip
+
+Bearer Token：
+  obs:<start.sh 显示的随机推流码>
+
+MediaMTX 上游默认只等 2 秒首个 RTP 包；本包已改为 15 秒，避免 4K 软件 x264/
+SVT-AV1 初始化较慢时，刚连接就被服务器主动关闭。
+
+x264：
+  Rate Control       CBR
+  Keyframe Interval  1～2 秒
+  CPU Usage Preset   veryfast 或更快（先确保实时编码）
+  Profile            main 或 baseline
+  Tune               zerolatency
+  B-frames           0
+  Repeat Headers     enabled
+
+说明：WebRTC 不支持 H.264 B 帧。OBS 的 WHIP 服务会向 x264 请求 bf=0 和
+repeat_headers，但仍建议检查日志/高级选项没有覆盖为其他值。
+
+SVT-AV1：
+  Rate Control       CBR（WHIP 下必须）
+  Keyframe Interval  1～2 秒
+  Format             8-bit 4:2:0
+  Preset             先选较快档位
+
+说明：OBS 32.2.1 的 SVT-AV1 封装只有在 CBR 下才把 pred-struct 设为
+low-delay P；CQP/VBR 可能产生不适合 WHIP/WebRTC 的帧重排。
+
+AOM AV1：
+  Rate Control       CBR
+  Keyframe Interval  1～2 秒（不能使用 0/自动）
+  Format             8-bit 4:2:0
+  CPU Usage          realtime / 足以保持实时
+
+网页默认“自动”模式会从 HLS manifest 检测 av01。浏览器明确支持 MSE AV1 时
+先使用 LL-HLS；否则使用 https://<域名>/rtc/live/whep 建立 WHEP 播放。域名只
+用于网页播放，不参与 OBS 推流。
+
+二、RTMP 兼容入口
+-----------------
+
+若 x264 或 SVT-AV1 在上述 WHIP 参数下仍会自动断开：
+
+服务：
+  自定义
+
+Server：
+  rtmp://<网卡IP>:1935
+
+Stream key：
+  live?user=obs&pass=<start.sh 显示的随机推流码>
+
+不要在 Stream key 的 pass 前添加 obs:。最终地址形如：
+  rtmp://192.168.1.10:1935/live?user=obs&pass=随机推流码
+
+RTMP 可以保留 WebRTC 不接受的帧重排和时间戳结构，是 MediaMTX 对 OBS 的兼容
+发布路径。它是明文协议，只允许可信局域网/VPN 来源访问 TCP/1935。
+
+AOM AV1 的 Enhanced RTMP 会先发送只有 `av01` FourCC、尚无 av1C 数据的
+sequence-start，占位之后再发送真实配置。官方 MediaMTX v1.19.3 所用
+gortmplib v0.4.1 会把第一个占位解析成 EOF 并关闭连接。本包固定使用随附的
+v1.19.3-r8 修补构建：忽略空占位，等待后续有效 av1C；start.sh 不会下载官方
+二进制覆盖它。
+
+三、仍然断流时
+--------------
+
+先把输出改为 1920x1080、30 FPS 再测试。软件 4K 编码很容易超过 CPU 实时能力。
+
+在 OBS 日志中搜索：
+  Encoding queue duration surpassed 5 seconds, terminating encoder
+
+出现该行表示 OBS 因编码队列超过 5 秒主动终止编码器，不是 MediaMTX 拒绝连接。
+应降低分辨率/帧率、选择更快 preset，或使用硬件编码器。
+
+四、AOM AV1 有流但网页无画面
+----------------------------
+
+先检查 OBS 的 Keyframe Interval：必须为 1～2 秒，不能是 0/自动。若 MediaMTX 日志出现
+`muxer error: reached maximum segment size`，同时 index.m3u8 返回 500 且正文为空，
+表示流中长期没有可用于 HLS 切段的 AV1 随机访问帧。设置为 2 秒并重新串流。
+
+MediaMTX v1.19.3-r8 还会归一化 OBS/libdatachannel 的 OBU size/extension 变体，并在
+真实 KEY_FRAME 缺少重复 sequence header 时补回启动时缓存的序列头。
+
+1. 保持播放器右上角为“自动”；也可分别点击“LL-HLS”和“WebRTC / AV1”诊断。
+2. 若 `/live/index.m3u8?cookieCheck=1` 连续返回 HTTP 500，自动模式会在三次
+   HLS 服务端失败后改走 WHEP；手动 LL-HLS 模式仍保留清单重试，便于查看原始错误。
+3. 浏览器必须在 WebRTC SDP 中声明 AV1/90000；否则网页会显示明确错误。
+4. 公网 WHEP 观众需访问 UDP 8189，TCP 8189 作为回退。8189 是经 ICE/DTLS
+   协商的加密媒体端口，不是 WHIP/RTMP 发布信令端口。
+5. 可点“LL-HLS”单独测试浏览器的 HLS/MSE AV1 能力。
+6. 浏览器不具备 AV1 解码器时，服务器不会转码，只能换浏览器/设备或在 OBS
+   改用 H.264。
+7. WHEP 连接后 12 秒仍无画面时，网页会区分“未收到 RTP”与“收到 RTP 但解码
+   帧为 0”，分别指向 PUBLIC_HOST/NAT/8189 或 AV1 profile/bit-depth/解码器。
+
+五、WebRTC / AV1 无声音
+-----------------------
+
+1. 网页为了满足浏览器自动播放策略，初始必定静音；点击右上角“开启声音”。
+2. OBS 通过 WHIP 推送时，音频应为 Opus。播放器会把 WHEP 分别送达的 AV1
+   视频轨和 Opus 音频轨合并到同一个 MediaStream，避免其中一轨覆盖另一轨。
+3. OBS 通过 RTMP 推送时，音频通常是 AAC。WebRTC/WHEP 不支持 AAC，因此可能
+   只有 AV1 画面；请切到 LL-HLS，或改用 OBS WHIP 发送 Opus。
+4. 如果 WHEP 会话没有任何音频轨，网页会明确提示检查 OBS 音轨是否启用/静音。
+5. 本包保持零转码，不会把 AAC 自动转换为 Opus。
+
+参考：
+  https://mediamtx.org/docs/publish/obs-studio
+  https://mediamtx.org/docs/features/webrtc-specific-features
+  https://mediamtx.org/docs/read/webrtc

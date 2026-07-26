@@ -1,0 +1,95 @@
+公网 Web / 内网推流安全策略（COMPAT-11）
+==========================================
+
+安全边界
+--------
+公网观看面：
+  TCP/443  HTTP/1.1 + HTTP/2 / TLS 1.3
+  UDP/443  HTTP/3 / QUIC / TLS 1.3
+  UDP/TCP 8189  仅在公网 WHEP/WebRTC 播放时需要，承载 DTLS-SRTP 加密媒体
+
+内网发布面：
+  TCP/8889  OBS WHIP 信令，仅绑定 WHIP_IP
+  TCP/1935  OBS RTMP 兼容入口，仅绑定 WHIP_IP
+
+内部面：
+  127.0.0.1:8080  Web/HLS gateway
+  127.0.0.1:8888  MediaMTX HLS
+
+TCP/8889 和 TCP/1935 不使用 0.0.0.0、* 或 IPv6 wildcard 监听。MediaMTX 的
+obs 发布账号还同时要求：
+  1. 每次启动生成的 128-bit 随机密码；
+  2. 来源地址属于启动时识别出的网卡局域网段或服务器 WHIP_IP/32；
+  3. 只能 publish:live，不能发布其他路径。
+
+start.sh 每次启动都读取已启用网卡的 IPv4 和真实掩码，优先使用默认路由的
+RFC1918 地址，并把 ACL 强制生成为“接口局域网段 + WHIP_IP/32 本机地址”。
+例如接口 192.168.50.10/24 会生成 192.168.50.0/24 和 192.168.50.10/32。
+旧版 INGEST_ALLOW_CIDRS 手工值仅为配置兼容而保留，会被忽略，不能扩大白名单。
+找不到私网网卡、WHIP_IP 不是本机已启用地址、地址属于公网或无法读取掩码时，
+启动会失败关闭。
+
+这层 MediaMTX IP ACL 不替代主机防火墙；两者应同时启用。即使路由器误把
+8889/1935 转发到公网，公网源地址仍不能通过发布账号的来源检查。
+
+公网路由
+--------
+Caddy 只公开：
+  GET/HEAD  /、/index.html、/app.css、/app.js、/hls.min.js、/live、/live/*
+  POST      /rtc/live/whep
+  PATCH/DELETE /rtc/live/whep/*
+
+/rtc 前缀只映射 WHEP 读取端点，绝不映射 /live/whip 发布端点。WHEP 请求体上限
+256 KiB；转发前移除客户端 Authorization 和 Cookie，避免把网页 Cookie 或意外凭据
+传给 MediaMTX。其他方法对 WHEP 路径返回 405，其他公网路径返回 404。
+
+WHEP 的 UDP/TCP 8189 是随机 ICE/DTLS-SRTP 媒体通道，不是发布信令入口。
+公网观众需要 WebRTC AV1 回退时必须允许访问 8189；只使用 LL-HLS 时可以在公网
+防火墙关闭 8189。
+
+TLS 与浏览器安全
+----------------
+- TLS minimum/maximum 均为 TLS 1.3
+- HTTP/80 不监听
+- QUIC 0-RTT disabled
+- strict SNI host enabled
+- HSTS: max-age=31536000
+- CSP: default-src 'none'；脚本、样式、连接和媒体只允许同源/必要 blob
+- frame-ancestors 'none'、X-Frame-Options DENY
+- nosniff、no-referrer、COOP same-origin、CORP same-origin
+- 禁用摄像头、麦克风、定位、支付、USB 等无关浏览器能力
+- 移除 Server 响应头
+
+内部网关
+--------
+- 只监听 127.0.0.1:8080
+- 只允许 GET/HEAD，拒绝请求正文（包括 chunked/未知长度正文）
+- 请求头上限 16 KiB
+- read-header timeout 5 秒
+- 有界的每来源 IP 频率表，防止攻击者地址耗尽内存
+- 只信任 loopback Caddy 传入的 X-Forwarded-For；非 loopback 同行无法伪造来源
+- 静态 JS/CSS 全部本地保存，不依赖第三方 CDN
+
+配置与凭据
+----------
+- config.env 使用严格 KEY=VALUE 数据解析器，不再用 shell 的点命令 source；
+  因此 $(...)、反引号和命令分隔符不会作为 root 命令执行。
+- 未知配置项、重复配置项和格式错误会失败关闭。
+- 运行配置权限 0600；logs、runtime、certs 目录权限 0700。
+- 明文推流码只显示在启动终端；MediaMTX 配置只保存 SHA-256 哈希。
+- stop.sh 删除生成配置；重新启动会轮换推流码。
+- PID 操作核对 /proc/<PID>/cmdline，避免陈旧 PID 文件误杀其他进程。
+- 启动自检拒绝未替换模板占位符，并检查 8889/1935 没有 wildcard 监听。
+
+明文内网协议
+------------
+WHIP/8889 的 HTTP Bearer Token 和 RTMP/1935 的账号密码均未使用 TLS。它们只能在
+启动识别出的可信局域网中使用。自动来源 ACL 与防火墙可以限制攻击面，但不能
+防止同网段嗅探；不可信网络不应直接使用这些明文推流入口。
+
+依赖供应链
+----------
+- MediaMTX r8 修补二进制固定随包提供，不会在启动时被官方版本覆盖。
+- hls.js 固定版本并校验 npm integrity。
+- Caddy 下载使用 GitHub 发布资产提供的 SHA-256 digest 校验。
+- 最终包通过 SHA256SUMS 核对全部受管文件。

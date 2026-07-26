@@ -1,0 +1,132 @@
+{
+	admin off
+	auto_https off
+
+	servers :443 {
+		# Compatibility mode:
+		# h1/h2 use TCP 443; h3 uses QUIC/UDP 443.
+		protocols h1 h2 h3
+
+		# Disable QUIC 0-RTT replay-prone early data.
+		0rtt off
+
+		# Reject mismatched SNI/Host combinations.
+		strict_sni_host on
+
+		max_header_size 16384
+
+		timeouts {
+			read_header 5s
+			idle 45s
+		}
+	}
+}
+
+https://__PUBLIC_DOMAIN__ {
+	tls "__TLS_CERT__" "__TLS_KEY__" {
+		# TLS 1.3 only. No TLS 1.2 fallback.
+		protocols tls1.3 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+
+		Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; img-src 'self' data:"
+
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+
+		Permissions-Policy "accelerometer=(), autoplay=(self), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		X-Permitted-Cross-Domain-Policies "none"
+
+		-Server
+	}
+
+	# Same-origin WHEP playback only. Publishing (/live/whip) is never routed
+	# through the public site. Restrict methods and SDP/ICE request bodies before
+	# proxying to the MediaMTX listener bound to the private ingest address.
+	@whepCreate {
+		path /rtc/live/whep
+		method POST
+	}
+	handle @whepCreate {
+		request_body {
+			max_size 256KB
+		}
+		uri strip_prefix /rtc
+		reverse_proxy __INGEST_IP__:8889 {
+			flush_interval -1
+			header_up Host __INGEST_IP__
+			header_up -Authorization
+			header_up -Cookie
+			# MediaMTX sees /live/whep and returns that backend path in Location.
+			# Restore the public /rtc prefix for standards-compliant WHEP clients.
+			header_down Location "^/live/whep/(.*)$" "/rtc/live/whep/$1"
+		}
+	}
+
+	@whepSession {
+		path /rtc/live/whep/*
+		method PATCH DELETE
+	}
+	handle @whepSession {
+		request_body {
+			max_size 256KB
+		}
+		uri strip_prefix /rtc
+		reverse_proxy __INGEST_IP__:8889 {
+			flush_interval -1
+			header_up Host __INGEST_IP__
+			header_up -Authorization
+			header_up -Cookie
+			header_down Location "^/live/whep/(.*)$" "/rtc/live/whep/$1"
+		}
+	}
+
+	# A public caller cannot turn the WHEP prefix into an unrestricted proxy.
+	@whepInvalid path /rtc/live/whep /rtc/live/whep/*
+	handle @whepInvalid {
+		header Allow "POST, PATCH, DELETE"
+		respond "method not allowed" 405
+	}
+
+	# Publicly allowed player/HLS paths.
+	@allowed path \
+ / \
+ /index.html \
+ /app.css \
+ /app.js \
+ /hls.min.js \
+ /live \
+ /live/*
+
+	# IMPORTANT:
+	# Use handle blocks so the fallback 404 does not execute before reverse_proxy.
+	handle @allowed {
+		reverse_proxy 127.0.0.1:8080 {
+			flush_interval -1
+			header_up Host 127.0.0.1
+		}
+	}
+
+	# Everything else is denied.
+	handle {
+		respond 404
+	}
+
+	# Errors raised before the normal header middleware (for example a WHEP
+	# request body larger than 256 KiB) must not restore Caddy's Server header.
+	handle_errors {
+		header {
+			-Server
+			Cache-Control "no-store"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+		}
+		respond "" {err.status_code}
+	}
+}
