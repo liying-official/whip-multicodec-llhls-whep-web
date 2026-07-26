@@ -1,0 +1,302 @@
+diff --git a/internal/stream/unit_remuxer.go b/internal/stream/unit_remuxer.go
+index 9b90a7c..8ad7650 100644
+--- a/internal/stream/unit_remuxer.go
++++ b/internal/stream/unit_remuxer.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 
+ 	"github.com/bluenviron/gortsplib/v5/pkg/format"
++	mcav1 "github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
+ 	mch264 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+ 	mch265 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
+ 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4video"
+@@ -12,6 +13,172 @@ import (
+ 
+ type unitRemuxer func(format.Format, unit.Payload) unit.Payload
+ 
++func av1PayloadWithExactSize(obu []byte, offset int) ([]byte, bool) {
++	if offset >= len(obu) {
++		return nil, false
++	}
++
++	var size mcav1.LEB128
++	n, err := size.Unmarshal(obu[offset:])
++	if err != nil {
++		return nil, false
++	}
++
++	payloadStart := offset + n
++	if int(size) != (len(obu) - payloadStart) {
++		return nil, false
++	}
++
++	return obu[payloadStart:], true
++}
++
++func normalizeAV1OBU(obu []byte) ([]byte, bool) {
++	if len(obu) == 0 {
++		return nil, false
++	}
++
++	header := obu[0]
++	if (header & 0b10000001) != 0 {
++		return nil, false
++	}
++
++	typ := (header >> 3) & 0b1111
++	hasExtension := (header & 0b00000100) != 0
++	hasSize := (header & 0b00000010) != 0
++	offset := 1
++
++	if hasExtension {
++		if len(obu) < 2 {
++			return nil, false
++		}
++
++		extension := obu[1]
++		if (extension & 0b111) != 0 {
++			return nil, false
++		}
++
++		temporalID := extension >> 5
++		spatialID := (extension >> 3) & 0b11
++
++		// CMAF carries a single decodable layer. Drop enhancement layers and
++		// remove the extension header from the base layer.
++		if temporalID != 0 || spatialID != 0 {
++			return nil, false
++		}
++
++		offset++
++	}
++
++	var data []byte
++	if hasSize {
++		var ok bool
++		data, ok = av1PayloadWithExactSize(obu, offset)
++		if !ok {
++			return nil, false
++		}
++	} else {
++		data = obu[offset:]
++	}
++
++	// libdatachannel <= v0.24.3 drops the OBU base header when an extension
++	// header is present, but leaves the internal LEB128 size field in place.
++	// A base-layer extension byte is zero, therefore it reaches us as a
++	// reserved type-0 OBU. OBS AOM emits OBU_FRAME in this path.
++	if typ == 0 && !hasExtension && !hasSize {
++		var ok bool
++		data, ok = av1PayloadWithExactSize(obu, 1)
++		if !ok {
++			return nil, false
++		}
++		typ = 6 // OBU_FRAME
++	}
++
++	// Ignore reserved OBU types instead of terminating every HLS muxer reader.
++	if typ == 0 || (typ >= 8 && typ <= 14) {
++		return nil, false
++	}
++
++	ret := make([]byte, 1+len(data))
++	ret[0] = typ << 3
++	copy(ret[1:], data)
++	return ret, true
++}
++
++func av1OBUIsKeyFrame(obu []byte, reducedStillPictureHeader bool) bool {
++	if len(obu) < 2 {
++		return false
++	}
++
++	typ := (obu[0] >> 3) & 0b1111
++	if typ != 3 && typ != 6 { // OBU_FRAME_HEADER, OBU_FRAME
++		return false
++	}
++
++	if reducedStillPictureHeader {
++		return true
++	}
++
++	// uncompressed_header(): show_existing_frame, then frame_type.
++	if (obu[1] & 0b10000000) != 0 {
++		return false
++	}
++
++	frameType := (obu[1] >> 5) & 0b11
++	return frameType == 0 // KEY_FRAME
++}
++
++func newUnitRemuxerAV1() unitRemuxer {
++	var sequenceHeader []byte
++	reducedStillPictureHeader := false
++
++	return func(_ format.Format, payload unit.Payload) unit.Payload {
++		tu := payload.(unit.PayloadAV1)
++		filtered := make([][]byte, 0, len(tu)+1)
++		hasSequenceHeader := false
++		hasKeyFrame := false
++
++		for _, obu := range tu {
++			normalized, ok := normalizeAV1OBU(obu)
++			if !ok {
++				continue
++			}
++
++			typ := (normalized[0] >> 3) & 0b1111
++			if typ == 1 { // OBU_SEQUENCE_HEADER
++				hasSequenceHeader = true
++
++				var parsed mcav1.SequenceHeader
++				if parsed.Unmarshal(normalized) == nil {
++					sequenceHeader = append(sequenceHeader[:0], normalized...)
++					reducedStillPictureHeader = parsed.ReducedStillPictureHeader
++				}
++			}
++
++			if av1OBUIsKeyFrame(normalized, reducedStillPictureHeader) {
++				hasKeyFrame = true
++			}
++
++			filtered = append(filtered, normalized)
++		}
++
++		// OBS AOM can emit a sequence header only at stream startup and does
++		// not repeat it when a later key frame is requested through PLI.
++		// gohlslib uses the sequence header as the AV1 random-access marker,
++		// therefore restore the cached header only before actual KEY_FRAMEs.
++		if hasKeyFrame && !hasSequenceHeader && len(sequenceHeader) != 0 {
++			withSequenceHeader := make([][]byte, 0, len(filtered)+1)
++			withSequenceHeader = append(withSequenceHeader, sequenceHeader)
++			filtered = append(withSequenceHeader, filtered...)
++		}
++
++		return unit.PayloadAV1(filtered)
++	}
++}
++
++func unitRemuxerAV1(forma format.Format, payload unit.Payload) unit.Payload {
++	return newUnitRemuxerAV1()(forma, payload)
++}
++
+ func unitRemuxerH265(forma format.Format, payload unit.Payload) unit.Payload {
+ 	formatH265 := forma.(*format.H265)
+ 	au := payload.(unit.PayloadH265)
+@@ -164,6 +331,9 @@ func unitRemuxerMPEG4Video(forma format.Format, payload unit.Payload) unit.Paylo
+ 
+ func newUnitRemuxer(forma format.Format) unitRemuxer {
+ 	switch forma.(type) {
++	case *format.AV1:
++		return newUnitRemuxerAV1()
++
+ 	case *format.H265:
+ 		return unitRemuxerH265
+ 
+diff --git a/internal/stream/unit_remuxer_test.go b/internal/stream/unit_remuxer_test.go
+new file mode 100644
+index 0000000..34e6683
+--- /dev/null
++++ b/internal/stream/unit_remuxer_test.go
+@@ -0,0 +1,101 @@
++package stream
++
++import (
++	"testing"
++
++	"github.com/bluenviron/gortsplib/v5/pkg/format"
++	"github.com/bluenviron/mediamtx/internal/unit"
++	"github.com/stretchr/testify/require"
++)
++
++func TestUnitRemuxerAV1(t *testing.T) {
++	for _, ca := range []struct {
++		name string
++		in   unit.PayloadAV1
++		out  unit.PayloadAV1
++	}{
++		{
++			name: "normal without size",
++			in:   unit.PayloadAV1{{0x30, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
++		},
++		{
++			name: "normal with size",
++			in:   unit.PayloadAV1{{0x32, 0x02, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
++		},
++		{
++			name: "sequence header with size",
++			in:   unit.PayloadAV1{{0x0A, 0x02, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x08, 0x11, 0x22}},
++		},
++		{
++			name: "proper base layer extension",
++			in:   unit.PayloadAV1{{0x34, 0x00, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
++		},
++		{
++			name: "proper base layer extension with size",
++			in:   unit.PayloadAV1{{0x36, 0x00, 0x02, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
++		},
++		{
++			name: "proper enhancement layer extension",
++			in:   unit.PayloadAV1{{0x34, 0x20, 0x11, 0x22}},
++			out:  unit.PayloadAV1{},
++		},
++		{
++			name: "libdatachannel missing base header",
++			in:   unit.PayloadAV1{{0x00, 0x02, 0x11, 0x22}},
++			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
++		},
++		{
++			name: "invalid internal size",
++			in:   unit.PayloadAV1{{0x32, 0x03, 0x11, 0x22}},
++			out:  unit.PayloadAV1{},
++		},
++		{
++			name: "empty and reserved",
++			in:   unit.PayloadAV1{{}, {0x40, 0x11}},
++			out:  unit.PayloadAV1{},
++		},
++	} {
++		t.Run(ca.name, func(t *testing.T) {
++			require.Equal(t, ca.out, unitRemuxerAV1(
++				&format.AV1{PayloadTyp: 96},
++				ca.in))
++		})
++	}
++}
++
++func TestUnitRemuxerAV1SequenceHeaderRestore(t *testing.T) {
++	remux := newUnitRemuxerAV1()
++	forma := &format.AV1{PayloadTyp: 96}
++	sequenceWithSize := []byte{
++		0x0a, 0x0b, 0x00, 0x00, 0x00, 0x42, 0xab,
++		0xbf, 0xc3, 0x71, 0xab, 0xe6, 0x01,
++	}
++	sequence := []byte{
++		0x08, 0x00, 0x00, 0x00, 0x42, 0xab,
++		0xbf, 0xc3, 0x71, 0xab, 0xe6, 0x01,
++	}
++
++	require.Equal(t, unit.PayloadAV1{sequence}, remux(
++		forma,
++		unit.PayloadAV1{sequenceWithSize}))
++
++	keyFrame := []byte{0x30, 0x10, 0x11}
++	require.Equal(t, unit.PayloadAV1{sequence, keyFrame}, remux(
++		forma,
++		unit.PayloadAV1{keyFrame}))
++
++	interFrame := []byte{0x30, 0x30, 0x22}
++	require.Equal(t, unit.PayloadAV1{interFrame}, remux(
++		forma,
++		unit.PayloadAV1{interFrame}))
++
++	showExistingFrame := []byte{0x30, 0x80, 0x33}
++	require.Equal(t, unit.PayloadAV1{showExistingFrame}, remux(
++		forma,
++		unit.PayloadAV1{showExistingFrame}))
++}
