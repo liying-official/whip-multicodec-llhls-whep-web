@@ -1,12 +1,16 @@
-公网 Web / 内网推流安全策略（COMPAT-11）
+公网 Web / 内网推流安全策略（R33）
 ==========================================
 
 安全边界
 --------
 公网观看面：
-  TCP/443  HTTP/1.1 + HTTP/2 / TLS 1.3
-  UDP/443  HTTP/3 / QUIC / TLS 1.3
+  TCP/PUBLIC_HTTPS_PORT  HTTP/1.1 + HTTP/2 / TLS 1.3
+  UDP/PUBLIC_HTTPS_PORT  HTTP/3 / QUIC / TLS 1.3
   UDP/TCP 8189  仅在公网 WHEP/WebRTC 播放时需要，承载 DTLS-SRTP 加密媒体
+
+服务器内 Caddy 固定监听 TCP/UDP 443；公网两种协议必须使用相同
+PUBLIC_HTTPS_PORT 映射到本机 443。Caddy 会在请求处理器中覆盖自动生成的本地
+443 Alt-Svc，通告配置的公网 HTTP/3 端口。
 
 内网发布面：
   TCP/8889  OBS WHIP 信令，仅绑定 WHIP_IP
@@ -18,13 +22,13 @@
 
 TCP/8889 和 TCP/1935 不使用 0.0.0.0、* 或 IPv6 wildcard 监听。MediaMTX 的
 obs 发布账号还同时要求：
-  1. 每次启动生成的 128-bit 随机密码；
+  1. 手工启动生成的 128-bit 随机密码，或 systemd 模式复用的 root-only 128-bit 凭据；
   2. 来源地址属于启动时识别出的网卡局域网段或服务器 WHIP_IP/32；
   3. 只能 publish:live，不能发布其他路径。
 
 start.sh 每次启动都读取已启用网卡的 IPv4 和真实掩码，优先使用默认路由的
 RFC1918 地址，并把 ACL 强制生成为“接口局域网段 + WHIP_IP/32 本机地址”。
-例如接口 192.168.50.10/24 会生成 192.168.50.0/24 和 192.168.50.10/32。
+例如接口 <LAN_IP>/<PREFIX_LENGTH> 会生成 <LAN_CIDR> 和 <LAN_IP>/32。
 旧版 INGEST_ALLOW_CIDRS 手工值仅为配置兼容而保留，会被忽略，不能扩大白名单。
 找不到私网网卡、WHIP_IP 不是本机已启用地址、地址属于公网或无法读取掩码时，
 启动会失败关闭。
@@ -36,15 +40,34 @@ RFC1918 地址，并把 ACL 强制生成为“接口局域网段 + WHIP_IP/32 �
 --------
 Caddy 只公开：
   GET/HEAD  /、/index.html、/app.css、/app.js、/hls.min.js、/live、/live/*
-  POST      /rtc/live/whep
-  PATCH/DELETE /rtc/live/whep/*
+  POST      /rtc/live/whep                  WHEP create
+  PATCH/DELETE /rtc/live/whep/*             WHEP session control
+  POST      /rtc/live/whep/*                仅播放器 X-WHEP-Keepalive: 1 心跳
 
 /rtc 前缀只映射 WHEP 读取端点，绝不映射 /live/whip 发布端点。WHEP 请求体上限
-256 KiB；转发前移除客户端 Authorization 和 Cookie，避免把网页 Cookie 或意外凭据
-传给 MediaMTX。其他方法对 WHEP 路径返回 405，其他公网路径返回 404。
+256 KiB；Caddy 先移除客户端 Authorization 和 Cookie，再把 WHEP 请求送入
+127.0.0.1:8080 的 Go 安全网关，由网关转发到 MediaMTX。其他方法返回 405，其他
+公网路径返回 404。
+
+WHEP 防滥用：
+- create POST 在进入任何 WHEP 限流/活动会话计数前，必须通过 MIME 解析并确认为 application/sdp；
+  text/plain、application/x-www-form-urlencoded 等 HTML simple-request 类型返回 415，不消耗观众 IP 的 WHEP 配额。
+- 单 IP 创建采用滚动窗口：最多 10 次 POST/10 秒。
+- 同一 IP 最多 30 次创建/60 秒。
+- 同一 IP 最多 5 个活动 WHEP 会话；并发创建在发往 MediaMTX 前先预占槽位，避免竞态绕过。
+- 成功创建后按 Location 记录会话并绑定创建者 IP；其他 IP 的 PATCH/DELETE 不会转发。
+- 播放器每 60 秒发送一次无正文同源心跳，5 分钟无刷新会自动释放本地活动计数。
+- 超限返回 HTTP 429 + Retry-After；短时/分钟限流和活动会话上限使用不同安全错误分类。
+- MediaMTX 错误正文不会透传给观众。已知“客户端不支持编码”被映射为
+  X-WHEP-Error: unsupported-codec，以保留 WHEP -> LL-HLS 自动 fallback。
+- 其他 MediaMTX 4xx/5xx 只返回通用 WHEP 错误，原始后端细节不会进入观众页面。
+- HLS reverse proxy 的 MediaMTX 4xx/5xx 同样在 helper 层清洗：保留 HTTP 状态码，
+  替换为固定 HLS 安全文案，并把后端错误响应头重建为最小安全白名单，设置 Cache-Control: no-store。
+  正常 2xx 与 3xx cookie redirect 不修改。
+- HLS 后端响应的 Server、Via、X-Powered-By 在 helper 层移除，Caddy 边缘仍再次移除 Server/Via。
 
 WHEP 的 UDP/TCP 8189 是随机 ICE/DTLS-SRTP 媒体通道，不是发布信令入口。
-公网观众需要 WebRTC AV1 回退时必须允许访问 8189；只使用 LL-HLS 时可以在公网
+公网观众需要 WebRTC AV1 / VP9 回退时必须允许访问 8189；只使用 LL-HLS 时可以在公网
 防火墙关闭 8189。
 
 TLS 与浏览器安全
@@ -52,23 +75,37 @@ TLS 与浏览器安全
 - TLS minimum/maximum 均为 TLS 1.3
 - HTTP/80 不监听
 - QUIC 0-RTT disabled
-- strict SNI host enabled
+- Host/SNI 必须严格一致；在可控 HTTP handler 内返回 421，以确保错误路径同样移除 Server/Via
 - HSTS: max-age=31536000
 - CSP: default-src 'none'；脚本、样式、连接和媒体只允许同源/必要 blob
 - frame-ancestors 'none'、X-Frame-Options DENY
 - nosniff、no-referrer、COOP same-origin、CORP same-origin
 - 禁用摄像头、麦克风、定位、支付、USB 等无关浏览器能力
-- 移除 Server 响应头
+- 移除 Server/Via 响应头，包括 Host/SNI 不匹配的 421
+- request-body 上限触发的 413 等 error route 也带完整 HSTS、CSP、COOP、CORP、
+  Permissions-Policy、X-Frame-Options、nosniff 和 no-referrer
 
 内部网关
 --------
 - 只监听 127.0.0.1:8080
-- 只允许 GET/HEAD，拒绝请求正文（包括 chunked/未知长度正文）
+- Web/HLS 只允许 GET/HEAD，并拒绝请求正文（包括 chunked/未知长度正文）
+- /rtc/live/whep 仅执行受控 WHEP create/session/keepalive 处理，不是通用反向代理
 - 请求头上限 16 KiB
 - read-header timeout 5 秒
 - 有界的每来源 IP 频率表，防止攻击者地址耗尽内存
 - 只信任 loopback Caddy 传入的 X-Forwarded-For；非 loopback 同行无法伪造来源
 - 静态 JS/CSS 全部本地保存，不依赖第三方 CDN
+- /hls.min.js 不再使用一年 immutable 固定文件名缓存，而是 `public, max-age=0, must-revalidate`；
+  浏览器可通过 Last-Modified/304 复用缓存，但服务器替换依赖后会立即重新验证。
+
+本地安装信任边界
+----------------------
+- start.sh 固定 PATH=/usr/sbin:/usr/bin:/sbin:/bin，避免 root 启动时使用不可信 PATH 中的同名工具。
+- 项目目录及其全部父目录必须 uid=0 且 group/other 不可写；从普通用户可写目录直接 sudo 启动会 fail-close。
+- start.sh、stop/status/diagnose、supervisor、config.env、Caddy/MediaMTX 模板、bin/web/src/third_party 以及关键 web/src 文件在执行包内程序前做相同所有权/权限检查。
+- 当前架构 helper 和随包 MediaMTX 二进制在 chmod/执行前单独再次检查。
+- 随包 web/hls.min.js、版本/许可证标记以及双架构 Caddy 都是必需的受管文件；
+  bin/caddy 运行副本若已存在，也必须由 root 所有且不可被 group/other 写。
 
 配置与凭据
 ----------
@@ -76,8 +113,11 @@ TLS 与浏览器安全
   因此 $(...)、反引号和命令分隔符不会作为 root 命令执行。
 - 未知配置项、重复配置项和格式错误会失败关闭。
 - 运行配置权限 0600；logs、runtime、certs 目录权限 0700。
-- 明文推流码只显示在启动终端；MediaMTX 配置只保存 SHA-256 哈希。
-- stop.sh 删除生成配置；重新启动会轮换推流码。
+- 手工模式的明文推流码只显示在启动终端；MediaMTX 配置只保存 SHA-256 哈希。
+- systemd 服务模式把 key+hash 存在 root:root 0600 的 runtime/publish.credentials，
+  不把明文写入 journal；show-credentials.sh 只允许 root 读取。
+- 手工 stop.sh 删除生成配置与持久凭据；重新启动会轮换推流码。systemd 管理器
+  停止/故障重启时使用显式保留参数，避免无人值守恢复破坏 OBS 配置。
 - PID 操作核对 /proc/<PID>/cmdline，避免陈旧 PID 文件误杀其他进程。
 - 启动自检拒绝未替换模板占位符，并检查 8889/1935 没有 wildcard 监听。
 
@@ -90,6 +130,31 @@ WHIP/8889 的 HTTP Bearer Token 和 RTMP/1935 的账号密码均未使用 TLS。
 依赖供应链
 ----------
 - MediaMTX r8 修补二进制固定随包提供，不会在启动时被官方版本覆盖。
-- hls.js 固定版本并校验 npm integrity。
-- Caddy 下载使用 GitHub 发布资产提供的 SHA-256 digest 校验。
+- hls.js v1.6.16 固定随包提供；生成发布资产时已校验 npm SHA-512 integrity，
+  运行时不再访问 npm。
+- Caddy 固定随包提供，不再运行时下载“最新版本”；amd64/arm64 均由固定的
+  v2.11.4 源码提交、Go 1.26.5 和 third_party/Caddy-go.mod/Caddy-go.sum 构建。
+- helper 使用 Go 1.26.5 构建；双架构二进制的 govulncheck 结果均为 0。
+- Caddy 的可修复依赖告警均已升级。二进制扫描仍记录 x/crypto/openpgp 的
+  GO-2026-5932（上游无修复版本），但 `go list -deps ./cmd/caddy` 的实际可执行
+  依赖图不包含该包；固定模块清单、哈希与复现方法见 third_party/Caddy-BUILD.txt。
+- MediaMTX r8 二进制扫描也只剩同一个 GO-2026-5932。该公告把未维护的 openpgp
+  全版本/全符号统一标记为不安全且没有修复版本；本项目没有 OpenPGP 输入、密钥
+  或消息处理接口，直播配置不会调用该功能。此项不能通过升级 x/crypto 消除，
+  其余可检测告警为 0。
 - 最终包通过 SHA256SUMS 核对全部受管文件。
+
+
+systemd 进程沙箱
+---------------
+- 可选 unit 使用 NoNewPrivileges、PrivateTmp、PrivateDevices、ProtectSystem=strict、
+  ProtectHome=read-only、capability bounding 和受限可写目录。
+- RestrictAddressFamilies 包含 AF_NETLINK，供 WHIP_IP 留空时读取默认路由和网卡；
+  对外监听仍仅允许 AF_INET/AF_INET6，UNIX 本地通信使用 AF_UNIX。
+- 安装器只接受 /opt 或 /usr/local 下不含特殊字符的 root 管理路径。
+- 服务模式仍以 root 启动；上述措施属于进程沙箱，不等同于完整的多用户权限拆分。
+
+安全更新说明
+------------
+当前版本的安全更新与验证摘要统一写在对应的 GitHub Release 介绍页面。运行包
+不附带历史更新日志、调试报告或测试环境记录；当前安全要求以本文件为准。

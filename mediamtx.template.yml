@@ -14,7 +14,7 @@ authInternalUsers:
       - action: publish
         path: live
 
-  # 网页/HLS 匿名观看。
+  # 网页/HLS/WebRTC 匿名观看。
   - user: any
     pass:
     ips: []
@@ -22,16 +22,31 @@ authInternalUsers:
       - action: read
         path: live
 
+  # 仅 loopback 可读取 MediaMTX metrics；监听地址也固定在 loopback。
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: metrics
+
 # OBS -> MediaMTX: WHIP / WebRTC
-# 视频原样通过：H.264 / H.265(HEVC) / AV1；音频通常为 Opus。
+# 视频原样通过：H.264 / H.265(HEVC) / AV1 / VP9；音频通常为 Opus。
 webrtc: true
 # WHIP 信令只绑定指定的 RFC1918 网卡 IPv4，不监听公网/其他网卡。
 webrtcAddress: "__INGEST_IP__:8889"
 webrtcEncryption: false
 webrtcAllowOrigins: []
+# Public WHEP requests reach MediaMTX only through the loopback Gateway. Trust it
+# so X-Forwarded-For can preserve the real viewer IP for loopback-only metrics.
+webrtcTrustedProxies: ["127.0.0.1", "::1"]
 webrtcLocalUDPAddress: :8189
 # TCP media fallback helps software encoders and WHEP viewers on networks that block UDP.
 webrtcLocalTCPAddress: :8189
+# Do not advertise every server interface (including unrelated IPv6/VPN/link-local
+# addresses). Explicitly advertise only the LAN ingest IPv4 plus the mandatory
+# PUBLIC_HOST A-only DNS name. DDNS can update its A record when public IPv4 changes. Public WHEP also filters non-IPv4 candidates.
+# This makes candidate selection deterministic across Windows Chromium/Edge.
+webrtcIPsFromInterfaces: false
 webrtcAdditionalHosts: __WEBRTC_ADDITIONAL_HOSTS__
 # The upstream default is 2s. 4K software x264/SVT-AV1 can take longer to emit
 # the first RTP frame, which otherwise makes MediaMTX close a valid WHIP session.
@@ -46,10 +61,16 @@ hlsAllowOrigins: []
 hlsAlwaysRemux: true
 hlsVariant: lowLatency
 
-# 服务器保留约 15 个 1s 分片；客户端目标直播延迟约 5 秒。
-hlsSegmentCount: 15
-hlsSegmentDuration: 1s
-hlsPartDuration: 200ms
+# 服务器保留 24 个约 2s 媒体段；每段内按 1s CMAF part 低延迟发布，
+# 为弱网短时断流恢复保留更大的追赶窗口。
+hlsSegmentCount: 24
+# Use one-second CMAF parts inside two-second segments. Shorter fractional
+# targets can round 24 fps parts to different durations, which MediaMTX warns
+# can break iOS LL-HLS clients. One second is an exact integer frame interval
+# for all common integer OBS frame rates while keeping parts available before
+# the two-second segment closes.
+hlsSegmentDuration: 2s
+hlsPartDuration: 1s
 hlsSegmentMaxSize: 50M
 hlsDirectory: ""
 hlsMuxerCloseAfter: 60s
@@ -64,7 +85,10 @@ rtmpAddress: "__INGEST_IP__:1935"
 srt: false
 moq: false
 api: false
-metrics: false
+metrics: true
+metricsAddress: 127.0.0.1:9998
+metricsEncryption: false
+metricsAllowOrigins: []
 pprof: false
 playback: false
 

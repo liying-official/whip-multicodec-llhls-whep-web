@@ -13,14 +13,22 @@ Debian 13 防火墙边界：公网观看、内网推流
 
 公网观看必须允许
 ----------------
-  TCP 443  HTTP/1.1 + HTTP/2 / TLS 1.3
-  UDP 443  HTTP/3 / QUIC / TLS 1.3
+  TCP PUBLIC_HTTPS_PORT  HTTP/1.1 + HTTP/2 / TLS 1.3
+  UDP PUBLIC_HTTPS_PORT  HTTP/3 / QUIC / TLS 1.3
+
+服务器本机 Caddy 仍监听 TCP/UDP 443。若路由器/NAT 的公网端口不是 443，必须将
+相同的 PUBLIC_HTTPS_PORT 分别按协议映射到本机 443。例如：
+  TCP <PUBLIC_HTTPS_PORT> -> TCP 443
+  UDP <PUBLIC_HTTPS_PORT> -> UDP 443
+
+只映射 TCP 时 HTTP/1.1/2 可用，但 HTTP/3 不可用；TCP/UDP 使用不同公网端口也
+与 Alt-Svc 通告不一致。
 
 公网 WHEP/WebRTC 播放还需要：
   UDP 8189  DTLS-SRTP 媒体（首选）
   TCP 8189  DTLS-SRTP 媒体回退
 
-8189 不是 WHIP/RTMP 发布信令端口。公网网页使用 WebRTC/AV1 回退时需要它；如果
+8189 不是 WHIP/RTMP 发布信令端口。公网网页使用 WebRTC/AV1/VP9 回退时需要它；如果
 网页永远只使用 LL-HLS，可以不向公网开放 8189。
 
 仅允许启动识别出的同网段局域网来源
@@ -29,11 +37,11 @@ Debian 13 防火墙边界：公网观看、内网推流
   TCP 1935  OBS RTMP 兼容推流
 
 示例来源网段：
-  192.168.50.0/24
+  <LAN_CIDR>
 
-程序会在启动时识别例如 192.168.50.10/24 的本机网卡，并自动生成：
-  192.168.50.0/24
-  192.168.50.10/32
+程序会在启动时识别本机私网网卡（<LAN_IP>/<PREFIX_LENGTH>），并自动生成：
+  <LAN_CIDR>
+  <LAN_IP>/32
 
 config.env 通常保持：
   WHIP_IP=
@@ -46,6 +54,7 @@ nftables 规则片段（合并进现有 input 链）
 ---------------------------------------
 以下只是规则顺序示例，不包含 SSH、established/related、loopback 等基础规则：
 
+  # 主机规则针对 Caddy 的本机监听端口；路由器可在外部使用 PUBLIC_HTTPS_PORT。
   tcp dport 443 accept
   udp dport 443 accept
 
@@ -53,7 +62,7 @@ nftables 规则片段（合并进现有 input 链）
   udp dport 8189 accept
   tcp dport 8189 accept
 
-  ip saddr 192.168.50.0/24 tcp dport { 8889, 1935 } accept
+  ip saddr <LAN_CIDR> tcp dport { 8889, 1935 } accept
   tcp dport { 8889, 1935 } drop
 
 先写内网 accept，再写发布端口 drop。若使用 VPN，把 VPN 地址池加入 accept；不要用
@@ -69,7 +78,8 @@ nftables 规则片段（合并进现有 input 链）
 
 IPv6
 ----
-Caddy 的公网 443 可以按需提供 IPv6。WHIP/RTMP 只绑定指定 IPv4，不提供公网 IPv6
+Caddy 的本机 443 可以按需提供 IPv6；IPv6 客户端实际访问端口仍须与
+PUBLIC_HTTPS_PORT 和 Alt-Svc 一致。WHIP/RTMP 只绑定指定 IPv4，不提供公网 IPv6
 发布入口。若开放公网 WHEP 的 IPv6 8189，仍只承载经 WHEP 会话协商的加密媒体。
 
 验证

@@ -1,6 +1,22 @@
 #!/bin/sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+PRESERVE_CREDENTIALS=0
+case "${1:-}" in
+  "") ;;
+  --preserve-credentials) PRESERVE_CREDENTIALS=1 ;;
+  *) echo "用法：sudo ./stop.sh [--preserve-credentials]" >&2; exit 2 ;;
+esac
+
+if [ "$PRESERVE_CREDENTIALS" -eq 0 ] \
+   && [ "$(id -u)" -eq 0 ] \
+   && command -v systemctl >/dev/null 2>&1 \
+   && systemctl is-active --quiet obs-whip-live.service 2>/dev/null; then
+  systemctl stop obs-whip-live.service
+  rm -f "$ROOT/runtime/publish.credentials"
+  echo "systemd 直播服务已停止；持久推流凭据已删除。"
+  exit 0
+fi
 stop_one() {
   file=$1
   expected=$2
@@ -41,6 +57,20 @@ case "$(uname -m)" in
 esac
 stop_one "$ROOT/runtime/caddy.pid" "$ROOT/bin/caddy"
 stop_one "$ROOT/runtime/gateway.pid" "$HELPER"
+# Tell the supervisor that this shutdown is intentional before stopping the
+# current child, otherwise it would immediately recreate MediaMTX.
+touch "$ROOT/runtime/mediamtx.stop"
+if [ -f "$ROOT/runtime/mediamtx.pid" ]; then
+  child=$(cat "$ROOT/runtime/mediamtx.pid" 2>/dev/null || true)
+  case "$child" in ""|*[!0-9]*) ;; *) kill -INT "$child" 2>/dev/null || true ;; esac
+fi
+stop_one "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh"
 stop_one "$ROOT/runtime/mediamtx.pid" "$ROOT/bin/mediamtx"
+rm -f "$ROOT/runtime/mediamtx.stop"
 rm -f "$ROOT/runtime/mediamtx.generated.yml" "$ROOT/runtime/Caddyfile"
-echo "直播服务器已停止；本次随机推流码已失效。"
+if [ "$PRESERVE_CREDENTIALS" -eq 1 ]; then
+  echo "直播服务器已停止；systemd 推流凭据已保留。"
+else
+  rm -f "$ROOT/runtime/publish.credentials"
+  echo "直播服务器已停止；本次随机推流码已失效。"
+fi

@@ -1,0 +1,59 @@
+Caddy R33 reproducible build record
+===================================
+
+Runtime version:
+  v2.11.4-r33-go1.26.5
+
+Upstream source:
+  https://github.com/caddyserver/caddy
+  tag: v2.11.4
+  commit: e2eee6a7fce366321294c9c2a79f3146891dcbdf
+
+Toolchain:
+  Go 1.26.5
+  CGO_ENABLED=0
+  GOOS=linux
+  GOARCH=amd64 or arm64
+
+Exact module graph:
+  Copy Caddy-go.mod to the upstream source root as go.mod.
+  Copy Caddy-go.sum to the upstream source root as go.sum.
+
+Security dependency updates relative to upstream v2.11.4 include:
+  github.com/go-chi/chi/v5 v5.3.0
+  github.com/klauspost/compress v1.18.7
+  go.opentelemetry.io/otel v1.44.0
+  go.opentelemetry.io/otel/metric v1.44.0
+  go.opentelemetry.io/otel/trace v1.44.0
+  golang.org/x/crypto v0.54.0
+  golang.org/x/net v0.56.0
+  golang.org/x/text v0.40.0
+  google.golang.org/grpc v1.82.1
+
+Build command (replace ARCH with amd64 or arm64):
+  GOTOOLCHAIN=go1.26.5 CGO_ENABLED=0 GOOS=linux GOARCH=ARCH \
+    go build -trimpath -buildvcs=false \
+    -ldflags='-s -w -buildid= -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4-r33-go1.26.5' \
+    -o caddy_linux_ARCH ./cmd/caddy
+
+SHA-256:
+  amd64  2d9683d8520210cc5b85a4af1f7b23295c812a7868c98a942601dbe1e7e48760
+  arm64  3b6c50d7bb13a46a2973e0eca5f029bd01d18670dc522edc68e59bb5f45c3159
+
+Reproducibility:
+  A second amd64 build from the same source, module files, toolchain and flags
+  produced the identical SHA-256 shown above (byte-for-byte cmp exit 0).
+
+Validation:
+  go test ./cmd/caddy ./caddyconfig/caddyfile ./modules/caddyhttp
+  passed with Go 1.26.5.
+
+Vulnerability audit:
+  All advisories with available fixed dependency versions were removed.
+  govulncheck -mode=binary reports only GO-2026-5932 for
+  golang.org/x/crypto/openpgp. The advisory has no fixed version, and
+  `go list -deps ./cmd/caddy` does not contain the openpgp package, so the
+  executable command dependency graph has no reachable import of that package.
+
+License:
+  See Caddy-LICENSE.txt.

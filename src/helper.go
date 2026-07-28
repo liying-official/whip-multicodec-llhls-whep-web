@@ -17,12 +17,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +33,18 @@ import (
 const (
 	maxDownloadSize       int64 = 256 << 20
 	maxRateLimiterEntries       = 20000
+	maxWhepRequestBody    int64 = 256 << 10
+	maxWhepResponseBody   int64 = 1 << 20
+	maxWhepErrorBody      int64 = 64 << 10
+	whepShortWindow             = 10 * time.Second
+	whepMinuteWindow            = time.Minute
+	whepShortLimit              = 10
+	whepMinuteLimit             = 30
+	whepMaxActivePerIP          = 5
+	whepSessionTTL              = 5 * time.Minute
 )
+
+var whepUnsupportedCodecRE = regexp.MustCompile(`(?i)codecs?\s+not\s+supported\s+by\s+client`)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -44,8 +57,6 @@ func main() {
 		err = runFetchMediaMTX(os.Args[2:])
 	case "fetch-hlsjs":
 		err = runFetchHLSJS(os.Args[2:])
-	case "fetch-caddy":
-		err = runFetchCaddy(os.Args[2:])
 	case "check-cert":
 		err = runCheckCert(os.Args[2:])
 	case "genkey":
@@ -66,7 +77,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: helper fetch-mediamtx|fetch-hlsjs|fetch-caddy|check-cert|genkey|private-cidrs|tcp|serve [options]")
+	fmt.Fprintln(os.Stderr, "usage: helper fetch-mediamtx|fetch-hlsjs|check-cert|genkey|private-cidrs|tcp|serve [options]")
 }
 
 func httpClient() *http.Client {
@@ -297,198 +308,6 @@ func extractMediaMTX(archivePath, out, licenseOut string) error {
 	return nil
 }
 
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-		Digest             string `json:"digest"`
-	} `json:"assets"`
-}
-
-func runFetchCaddy(args []string) error {
-	fs := flag.NewFlagSet("fetch-caddy", flag.ContinueOnError)
-	arch := fs.String("arch", "amd64", "amd64 or arm64")
-	out := fs.String("out", "./bin/caddy", "output binary")
-	licenseOut := fs.String("license", "", "optional LICENSE output")
-	versionFile := fs.String("version-file", "", "optional version marker")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *arch != "amd64" && *arch != "arm64" {
-		return fmt.Errorf("unsupported Caddy architecture: %s", *arch)
-	}
-	if st, err := os.Stat(*out); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
-		return os.Chmod(*out, 0755)
-	}
-
-	api := "https://api.github.com/repos/caddyserver/caddy/releases/latest"
-	b, err := getBytes(api, 8<<20)
-	if err != nil {
-		return fmt.Errorf("download Caddy release metadata: %w", err)
-	}
-	var rel githubRelease
-	if err := json.Unmarshal(b, &rel); err != nil {
-		return err
-	}
-	if !strings.HasPrefix(rel.TagName, "v") {
-		return fmt.Errorf("invalid Caddy release tag: %q", rel.TagName)
-	}
-	ver := strings.TrimPrefix(rel.TagName, "v")
-	filename := fmt.Sprintf("caddy_%s_linux_%s.tar.gz", ver, *arch)
-
-	var assetURL, digest string
-	for _, a := range rel.Assets {
-		if a.Name == filename {
-			assetURL, digest = a.BrowserDownloadURL, strings.ToLower(a.Digest)
-			break
-		}
-	}
-	if assetURL == "" {
-		return fmt.Errorf("Caddy release asset not found: %s", filename)
-	}
-	if !strings.HasPrefix(digest, "sha256:") || len(strings.TrimPrefix(digest, "sha256:")) != 64 {
-		return fmt.Errorf("Caddy release asset has no usable GitHub SHA-256 digest")
-	}
-	want := strings.TrimPrefix(digest, "sha256:")
-
-	fmt.Printf("首次启动：下载 Caddy %s (%s)...\n", rel.TagName, *arch)
-	req, err := newGET(assetURL)
-	if err != nil {
-		return err
-	}
-	resp, err := httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download Caddy: HTTP %s", resp.Status)
-	}
-
-	tmp := *out + ".tar.gz"
-	if err := os.MkdirAll(filepath.Dir(*out), 0755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	n, cpErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxDownloadSize+1))
-	clErr := f.Close()
-	if cpErr != nil {
-		os.Remove(tmp)
-		return cpErr
-	}
-	if clErr != nil {
-		os.Remove(tmp)
-		return clErr
-	}
-	if n > maxDownloadSize {
-		os.Remove(tmp)
-		return errors.New("Caddy release asset too large")
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-		os.Remove(tmp)
-		return fmt.Errorf("Caddy SHA256 mismatch: got %s want %s", got, want)
-	}
-
-	if err := extractCaddy(tmp, *out, *licenseOut); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	os.Remove(tmp)
-	if *versionFile != "" {
-		if err := os.MkdirAll(filepath.Dir(*versionFile), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(*versionFile, []byte("Caddy "+rel.TagName+"\nSHA256 "+got+"\n"), 0644); err != nil {
-			return err
-		}
-	}
-	fmt.Printf("Caddy 校验完成：SHA256 %s\n", got)
-	return nil
-}
-
-func extractCaddy(archivePath, out, licenseOut string) error {
-	f, err := os.Open(archivePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	gotBin := false
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-		base := filepath.Base(hdr.Name)
-		switch base {
-		case "caddy":
-			tmpOut := out + ".tmp"
-			of, err := os.OpenFile(tmpOut, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0755)
-			if err != nil {
-				return err
-			}
-			_, cpErr := io.Copy(of, io.LimitReader(tr, maxDownloadSize))
-			clErr := of.Close()
-			if cpErr != nil {
-				os.Remove(tmpOut)
-				return cpErr
-			}
-			if clErr != nil {
-				os.Remove(tmpOut)
-				return clErr
-			}
-			if err := os.Chmod(tmpOut, 0755); err != nil {
-				os.Remove(tmpOut)
-				return err
-			}
-			if err := os.Rename(tmpOut, out); err != nil {
-				os.Remove(tmpOut)
-				return err
-			}
-			gotBin = true
-		case "LICENSE":
-			if licenseOut != "" {
-				if err := os.MkdirAll(filepath.Dir(licenseOut), 0755); err != nil {
-					return err
-				}
-				lf, err := os.OpenFile(licenseOut, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-				if err != nil {
-					return err
-				}
-				_, cpErr := io.Copy(lf, io.LimitReader(tr, 2<<20))
-				clErr := lf.Close()
-				if cpErr != nil {
-					return cpErr
-				}
-				if clErr != nil {
-					return clErr
-				}
-			}
-		}
-	}
-	if !gotBin {
-		return errors.New("caddy binary not found in release archive")
-	}
-	return nil
-}
-
 func runCheckCert(args []string) error {
 	fs := flag.NewFlagSet("check-cert", flag.ContinueOnError)
 	certPath := fs.String("cert", "", "certificate PEM")
@@ -583,7 +402,7 @@ func runFetchHLSJS(args []string) error {
 		return fmt.Errorf("invalid npm integrity: %w", err)
 	}
 
-	fmt.Printf("首次启动：下载 hls.js v%s...\n", *version)
+	fmt.Printf("下载 hls.js v%s...\n", *version)
 	req, err := newGET(meta.Dist.Tarball)
 	if err != nil {
 		return err
@@ -825,25 +644,82 @@ func runTCP(args []string) error {
 	return c.Close()
 }
 
+func genericHLSError(status int) string {
+	switch {
+	case status == http.StatusNotFound:
+		return "HLS stream unavailable\n"
+	case status >= 500:
+		return "HLS service unavailable\n"
+	default:
+		return "HLS request rejected\n"
+	}
+}
+
+func sanitizeHLSResponse(resp *http.Response) error {
+	// Strip backend implementation-identifying headers on every HLS response.
+	// Preserve successful bodies and redirects (MediaMTX uses redirects and
+	// cookies while establishing LL-HLS sessions), but replace backend 4xx/5xx
+	// bodies so implementation details never reach the viewer.
+	resp.Header.Del("Server")
+	resp.Header.Del("Via")
+	resp.Header.Del("X-Powered-By")
+	if resp.StatusCode < 400 {
+		return nil
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	body := genericHLSError(resp.StatusCode)
+	resp.Body = io.NopCloser(strings.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	// Replace the entire backend error header set with a tiny allowlist. This
+	// prevents a future MediaMTX diagnostic/debug header from becoming a new
+	// viewer-facing disclosure channel.
+	resp.Header = make(http.Header)
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp.Header.Set("Cache-Control", "no-store")
+	resp.Header.Set("X-Content-Type-Options", "nosniff")
+	return nil
+}
+
 func newProxy(target *url.URL, stripPrefix string) *httputil.ReverseProxy {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+	proxy := &httputil.ReverseProxy{}
+	proxy.Rewrite = func(proxyReq *httputil.ProxyRequest) {
+		// Rewrite removes untrusted forwarding headers before this callback.
+		// The helper listens on loopback only, so preserve the values Caddy
+		// generated for the public request after SetXForwarded initializes a
+		// clean header set.
+		forwardedFor := proxyReq.In.Header.Get("X-Forwarded-For")
+		forwardedHost := proxyReq.In.Header.Get("X-Forwarded-Host")
+		forwardedProto := proxyReq.In.Header.Get("X-Forwarded-Proto")
+		proxyReq.SetURL(target)
+		proxyReq.SetXForwarded()
+		if forwardedFor != "" {
+			proxyReq.Out.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		if forwardedHost != "" {
+			proxyReq.Out.Header.Set("X-Forwarded-Host", forwardedHost)
+		}
+		if forwardedProto == "http" || forwardedProto == "https" {
+			proxyReq.Out.Header.Set("X-Forwarded-Proto", forwardedProto)
+		}
 		if stripPrefix != "" {
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, stripPrefix)
-			if req.URL.RawPath != "" {
-				req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, stripPrefix)
+			proxyReq.Out.URL.Path = strings.TrimPrefix(proxyReq.Out.URL.Path, stripPrefix)
+			if proxyReq.Out.URL.RawPath != "" {
+				proxyReq.Out.URL.RawPath = strings.TrimPrefix(proxyReq.Out.URL.RawPath, stripPrefix)
 			}
 		}
-		if req.URL.Path == "" {
-			req.URL.Path = "/"
+		if proxyReq.Out.URL.Path == "" {
+			proxyReq.Out.URL.Path = "/"
 		}
-		req.Host = target.Host
+		proxyReq.Out.Host = target.Host
 	}
 	proxy.FlushInterval = -1
+	proxy.ModifyResponse = sanitizeHLSResponse
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("HLS proxy error for %s: %v", r.URL.Path, err)
+		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "HLS backend unavailable", http.StatusBadGateway)
 	}
 	return proxy
@@ -926,16 +802,535 @@ func requestHasBody(r *http.Request) bool {
 	return r.ContentLength != 0 || len(r.TransferEncoding) != 0
 }
 
+type whepClientState struct {
+	posts  []time.Time
+	active int
+}
+
+type whepSessionState struct {
+	ip       string
+	mediaID  string
+	lastSeen time.Time
+}
+
+type whepSessionSnapshot struct {
+	ID       string `json:"id"`
+	IP       string `json:"ip"`
+	LastSeen int64  `json:"last_seen_unix"`
+}
+
+type whepGuard struct {
+	mu          sync.Mutex
+	clients     map[string]*whepClientState
+	sessions    map[string]whepSessionState
+	lastCleanup time.Time
+}
+
+func newWhepGuard() *whepGuard {
+	return &whepGuard{
+		clients:     make(map[string]*whepClientState),
+		sessions:    make(map[string]whepSessionState),
+		lastCleanup: time.Now(),
+	}
+}
+
+func pruneTimes(values []time.Time, cutoff time.Time) []time.Time {
+	i := 0
+	for i < len(values) && values[i].Before(cutoff) {
+		i++
+	}
+	if i == 0 {
+		return values
+	}
+	return append(values[:0], values[i:]...)
+}
+
+func retryAfterSeconds(deadline, now time.Time) int {
+	d := deadline.Sub(now)
+	if d <= 0 {
+		return 1
+	}
+	n := int((d + time.Second - 1) / time.Second)
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+func (g *whepGuard) cleanupLocked(now time.Time) {
+	if now.Sub(g.lastCleanup) < time.Minute {
+		return
+	}
+	for key, session := range g.sessions {
+		if now.Sub(session.lastSeen) <= whepSessionTTL {
+			continue
+		}
+		delete(g.sessions, key)
+		if state := g.clients[session.ip]; state != nil && state.active > 0 {
+			state.active--
+		}
+	}
+	cutoff := now.Add(-whepMinuteWindow)
+	for ip, state := range g.clients {
+		state.posts = pruneTimes(state.posts, cutoff)
+		if state.active == 0 && len(state.posts) == 0 {
+			delete(g.clients, ip)
+		}
+	}
+	g.lastCleanup = now
+}
+
+// reserveCreate applies exact rolling limits for WHEP session creation and
+// reserves one active slot before a request is sent to MediaMTX. The reserved
+// slot prevents concurrent POSTs from racing past the per-IP active limit.
+func (g *whepGuard) reserveCreate(ip string, now time.Time) (bool, int, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleanupLocked(now)
+
+	state := g.clients[ip]
+	if state == nil {
+		if len(g.clients) >= maxRateLimiterEntries {
+			return false, 60, "client-table-full"
+		}
+		state = &whepClientState{}
+		g.clients[ip] = state
+	}
+	state.posts = pruneTimes(state.posts, now.Add(-whepMinuteWindow))
+
+	if state.active >= whepMaxActivePerIP {
+		return false, 30, "active-session-limit"
+	}
+
+	shortCutoff := now.Add(-whepShortWindow)
+	shortStart := len(state.posts)
+	for i, ts := range state.posts {
+		if !ts.Before(shortCutoff) {
+			shortStart = i
+			break
+		}
+	}
+	shortPosts := state.posts[shortStart:]
+	if len(shortPosts) >= whepShortLimit {
+		return false, retryAfterSeconds(shortPosts[0].Add(whepShortWindow), now), "burst-rate-limit"
+	}
+	if len(state.posts) >= whepMinuteLimit {
+		return false, retryAfterSeconds(state.posts[0].Add(whepMinuteWindow), now), "minute-rate-limit"
+	}
+
+	state.posts = append(state.posts, now)
+	state.active++
+	return true, 0, ""
+}
+
+func (g *whepGuard) cancelReservation(ip string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if state := g.clients[ip]; state != nil && state.active > 0 {
+		state.active--
+	}
+}
+
+func validWhepSessionID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func backendWhepSessionID(headers http.Header, location string) string {
+	if id := strings.TrimSpace(headers.Get("ID")); validWhepSessionID(id) {
+		return id
+	}
+	u, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	id := strings.TrimSpace(parts[len(parts)-1])
+	if id == "whep" || !validWhepSessionID(id) {
+		return ""
+	}
+	return id
+}
+
+func (g *whepGuard) commitSession(ip, key, mediaID string, now time.Time) bool {
+	if key == "" || !validWhepSessionID(mediaID) {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, exists := g.sessions[key]; exists {
+		return false
+	}
+	g.sessions[key] = whepSessionState{ip: ip, mediaID: mediaID, lastSeen: now}
+	return true
+}
+
+func (g *whepGuard) snapshots(now time.Time) []whepSessionSnapshot {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleanupLocked(now)
+	out := make([]whepSessionSnapshot, 0, len(g.sessions))
+	for _, session := range g.sessions {
+		if !validWhepSessionID(session.mediaID) || net.ParseIP(session.ip) == nil {
+			continue
+		}
+		out = append(out, whepSessionSnapshot{
+			ID: session.mediaID, IP: session.ip, LastSeen: session.lastSeen.Unix(),
+		})
+	}
+	return out
+}
+
+func (g *whepGuard) ownsSession(ip, key string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleanupLocked(now)
+	session, ok := g.sessions[key]
+	return ok && session.ip == ip
+}
+
+func (g *whepGuard) touchSession(ip, key string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleanupLocked(now)
+	session, ok := g.sessions[key]
+	if !ok || session.ip != ip {
+		return false
+	}
+	session.lastSeen = now
+	g.sessions[key] = session
+	return true
+}
+
+func (g *whepGuard) releaseSession(ip, key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	session, ok := g.sessions[key]
+	if !ok || session.ip != ip {
+		return
+	}
+	delete(g.sessions, key)
+	if state := g.clients[ip]; state != nil && state.active > 0 {
+		state.active--
+	}
+}
+
+func publicWhepSessionPath(location string) (string, bool) {
+	u, err := url.Parse(location)
+	if err != nil {
+		return "", false
+	}
+	path := u.Path
+	if strings.HasPrefix(path, "/rtc/live/whep/") {
+		return path, true
+	}
+	if strings.HasPrefix(path, "/live/whep/") {
+		return "/rtc" + path, true
+	}
+	return "", false
+}
+
+func copyWhepResponseHeaders(dst, src http.Header) {
+	for _, name := range []string{"Content-Type", "ETag", "Accept-Patch", "Link", "Cache-Control"} {
+		for _, value := range src.Values(name) {
+			dst.Add(name, value)
+		}
+	}
+}
+
+// filterWhepSDPIPv4Candidates is a defense-in-depth boundary for the public
+// WHEP endpoint. MediaMTX resolves webrtcAdditionalHosts server-side; when a
+// DDNS hostname unexpectedly gains an AAAA record, the answer can therefore
+// contain IPv6 host candidates even though this package intentionally uses an
+// IPv4/LAN ICE topology. Keep only syntactically valid IPv4 candidate lines.
+// Non-candidate SDP lines and their original line endings are preserved.
+func filterWhepSDPIPv4Candidates(body []byte) ([]byte, int, bool) {
+	text := string(body)
+	var out strings.Builder
+	out.Grow(len(text))
+	dropped := 0
+	hasIPv4 := false
+
+	for len(text) > 0 {
+		segment := text
+		text = ""
+		if i := strings.IndexByte(segment, '\n'); i >= 0 {
+			segment, text = segment[:i+1], segment[i+1:]
+		}
+
+		line := strings.TrimSuffix(segment, "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if strings.HasPrefix(line, "a=candidate:") {
+			fields := strings.Fields(line)
+			if len(fields) < 6 {
+				dropped++
+				continue
+			}
+			ip := net.ParseIP(fields[4])
+			if ip == nil || ip.To4() == nil {
+				dropped++
+				continue
+			}
+			hasIPv4 = true
+		}
+		out.WriteString(segment)
+	}
+
+	return []byte(out.String()), dropped, hasIPv4
+}
+
+func genericWhepError(status int, class string) string {
+	switch class {
+	case "unsupported-codec":
+		return "WHEP codec unsupported\n"
+	case "rate-limit":
+		return "WHEP request limit exceeded\n"
+	case "session-limit":
+		return "WHEP active session limit exceeded\n"
+	}
+	switch {
+	case status == http.StatusNotFound:
+		return "WHEP session unavailable\n"
+	case status >= 500:
+		return "WHEP service unavailable\n"
+	default:
+		return "WHEP request rejected\n"
+	}
+}
+
+type whepGateway struct {
+	target *url.URL
+	guard  *whepGuard
+	client *http.Client
+}
+
+func newWhepGateway(target *url.URL) *whepGateway {
+	return &whepGateway{
+		target: target,
+		guard:  newWhepGuard(),
+		client: &http.Client{Timeout: 20 * time.Second},
+	}
+}
+
+func isSDPContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && strings.EqualFold(mediaType, "application/sdp")
+}
+
+func (g *whepGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	now := time.Now()
+	path := r.URL.Path
+	isCreate := path == "/rtc/live/whep" && r.Method == http.MethodPost
+	isSession := strings.HasPrefix(path, "/rtc/live/whep/")
+
+	if !isCreate && !isSession {
+		http.NotFound(w, r)
+		return
+	}
+
+	if isSession && r.Method == http.MethodPost && r.Header.Get("X-WHEP-Keepalive") == "1" {
+		if requestHasBody(r) {
+			http.Error(w, "request body not allowed", http.StatusBadRequest)
+			return
+		}
+		if !g.guard.touchSession(ip, path, now) {
+			http.Error(w, genericWhepError(http.StatusNotFound, ""), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if isCreate {
+		// Validate the non-simple WHEP media type before touching rate-limit or
+		// active-session state. This prevents a cross-site HTML form using a
+		// simple content type (for example text/plain) from exhausting a viewer's
+		// per-IP WHEP quota. Optional MIME parameters are accepted.
+		if !isSDPContentType(r.Header.Get("Content-Type")) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Accept-Post", "application/sdp")
+			http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
+			return
+		}
+
+		ok, retry, reason := g.guard.reserveCreate(ip, now)
+		if !ok {
+			class := "rate-limit"
+			if reason == "active-session-limit" {
+				class = "session-limit"
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+			w.Header().Set("X-WHEP-Error", class)
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, strings.TrimSpace(genericWhepError(http.StatusTooManyRequests, class)), http.StatusTooManyRequests)
+			return
+		}
+	} else {
+		if r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+			w.Header().Set("Allow", "PATCH, DELETE")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !g.guard.ownsSession(ip, path, now) {
+			http.Error(w, strings.TrimSpace(genericWhepError(http.StatusNotFound, "")), http.StatusNotFound)
+			return
+		}
+	}
+
+	reserved := isCreate
+	if r.ContentLength > maxWhepRequestBody {
+		if reserved {
+			g.guard.cancelReservation(ip)
+		}
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxWhepRequestBody)
+	}
+
+	backend := *g.target
+	backend.Path = strings.TrimPrefix(path, "/rtc")
+	backend.RawPath = ""
+	backend.RawQuery = r.URL.RawQuery
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, backend.String(), r.Body)
+	if err == nil {
+		outReq.ContentLength = r.ContentLength
+	}
+	if err != nil {
+		if reserved {
+			g.guard.cancelReservation(ip)
+		}
+		http.Error(w, strings.TrimSpace(genericWhepError(http.StatusBadGateway, "")), http.StatusBadGateway)
+		return
+	}
+	for _, name := range []string{"Content-Type", "Accept", "If-Match"} {
+		if value := r.Header.Get(name); value != "" {
+			outReq.Header.Set(name, value)
+		}
+	}
+	// clientIP() trusts X-Forwarded-For only from a loopback peer (bundled Caddy).
+	// MediaMTX trusts this loopback Gateway, allowing its loopback-only metrics
+	// endpoint to expose the real WHEP viewer IP instead of 127.0.0.1.
+	if ip != "" {
+		outReq.Header.Set("X-Forwarded-For", ip)
+	}
+	outReq.Header.Set("User-Agent", "obs-whip-public-whep-gateway/r33")
+
+	resp, err := g.client.Do(outReq)
+	if err != nil {
+		if reserved {
+			g.guard.cancelReservation(ip)
+		}
+		log.Printf("WHEP backend unavailable: status=transport-error path=%s", path)
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, strings.TrimSpace(genericWhepError(http.StatusBadGateway, "")), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxWhepErrorBody+1))
+		class := ""
+		if resp.StatusCode == http.StatusBadRequest && whepUnsupportedCodecRE.Match(body) {
+			class = "unsupported-codec"
+			w.Header().Set("X-WHEP-Error", class)
+		}
+		log.Printf("WHEP backend rejected request: status=%d class=%s path=%s", resp.StatusCode, class, path)
+		if reserved {
+			g.guard.cancelReservation(ip)
+		}
+		if r.Method == http.MethodDelete {
+			g.guard.releaseSession(ip, path)
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.WriteString(w, genericWhepError(resp.StatusCode, class))
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWhepResponseBody+1))
+	if err != nil || int64(len(body)) > maxWhepResponseBody {
+		if reserved {
+			g.guard.cancelReservation(ip)
+		}
+		http.Error(w, strings.TrimSpace(genericWhepError(http.StatusBadGateway, "")), http.StatusBadGateway)
+		return
+	}
+
+	if isCreate {
+		filtered, dropped, hasIPv4 := filterWhepSDPIPv4Candidates(body)
+		if dropped != 0 && !hasIPv4 {
+			if reserved {
+				g.guard.cancelReservation(ip)
+			}
+			log.Printf("WHEP backend answer has no usable IPv4 ICE candidate: dropped=%d", dropped)
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, strings.TrimSpace(genericWhepError(http.StatusBadGateway, "")), http.StatusBadGateway)
+			return
+		}
+		if dropped != 0 {
+			log.Printf("WHEP stripped %d non-IPv4 ICE candidate(s) from public SDP answer", dropped)
+		}
+		body = filtered
+	}
+
+	copyWhepResponseHeaders(w.Header(), resp.Header)
+	w.Header().Set("Cache-Control", "no-store")
+
+	if isCreate {
+		location := resp.Header.Get("Location")
+		publicPath, ok := publicWhepSessionPath(location)
+		mediaID := backendWhepSessionID(resp.Header, location)
+		if !ok || !g.guard.commitSession(ip, publicPath, mediaID, now) {
+			g.guard.cancelReservation(ip)
+			log.Printf("WHEP backend returned an invalid/duplicate Location or session ID")
+			http.Error(w, strings.TrimSpace(genericWhepError(http.StatusBadGateway, "")), http.StatusBadGateway)
+			return
+		}
+		reserved = false
+		w.Header().Set("Location", publicPath)
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	if r.Method != http.MethodHead && len(body) != 0 {
+		_, _ = w.Write(body)
+	}
+	if r.Method == http.MethodDelete {
+		g.guard.releaseSession(ip, path)
+	}
+}
+
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("dir", "./web", "web root")
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
 	backend := fs.String("hls-backend", "http://127.0.0.1:8888", "MediaMTX HLS backend")
+	whepBackend := fs.String("whep-backend", "http://127.0.0.1:8889", "MediaMTX WHEP backend")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	target, err := url.Parse(*backend)
+	if err != nil {
+		return err
+	}
+	whepTarget, err := url.Parse(*whepBackend)
 	if err != nil {
 		return err
 	}
@@ -954,6 +1349,7 @@ func runServe(args []string) error {
 	}
 
 	liveProxy := newProxy(target, "")
+	whepProxy := newWhepGateway(whepTarget)
 	limiter := newFixedLimiter(6000, time.Minute)
 
 	mux := http.NewServeMux()
@@ -970,12 +1366,43 @@ func runServe(args []string) error {
 			http.ServeFile(w, r, path)
 		}
 	}
-	mux.HandleFunc("/hls.min.js", serveFile(hlsJSPath, "text/javascript; charset=utf-8", "public, max-age=31536000, immutable"))
+	mux.HandleFunc("/hls.min.js", serveFile(hlsJSPath, "text/javascript; charset=utf-8", "public, max-age=0, must-revalidate"))
 	mux.HandleFunc("/app.js", serveFile(appJSPath, "text/javascript; charset=utf-8", "no-cache"))
 	mux.HandleFunc("/app.css", serveFile(appCSSPath, "text/css; charset=utf-8", "no-cache"))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
+	})
+	mux.HandleFunc("/__internal/whep-sessions", func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		peer := net.ParseIP(host)
+		if peer == nil || !peer.IsLoopback() {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if requestHasBody(r) {
+			http.Error(w, "request body not allowed", http.StatusBadRequest)
+			return
+		}
+		payload := struct {
+			Sessions []whepSessionSnapshot `json:"sessions"`
+		}{Sessions: whepProxy.guard.snapshots(time.Now())}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
@@ -990,6 +1417,10 @@ func runServe(args []string) error {
 	})
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rtc/live/whep" || strings.HasPrefix(r.URL.Path, "/rtc/live/whep/") {
+			whepProxy.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -1,23 +1,40 @@
 DNS 配置
 ========
 
-现在不再要求 QUIC-only，因此普通 A / AAAA 记录即可。
+公网网页 PUBLIC_DOMAIN 可使用普通 A / AAAA。WebRTC 的 PUBLIC_HOST 必须使用仅有 IPv4 A、没有 AAAA 的域名。
 
 示例：
   live.example.com. 300 IN A 203.0.113.10
 
 有 IPv6：
-  live.example.com. 300 IN AAAA 2001:db8::10
+  # PUBLIC_DOMAIN 如需 IPv6 可另有 AAAA；PUBLIC_HOST 不要设置 AAAA。
 
 HTTP/3 / HTTPS RR
 -----------------
 HTTPS/SVCB RR 不再是必须项。
 
 支持它的 DNS 服务商可以额外发布 HTTP/3 能力以优化首次连接，但即使不配置，
-浏览器仍可先通过 TCP/443 的 HTTP/2/HTTP/1.1 连接。
+浏览器仍可先通过 PUBLIC_HTTPS_PORT/TCP 的 HTTP/2/HTTP/1.1 连接，并从
+Caddy 的 Alt-Svc 发现 HTTP/3。
 
-本包始终同时提供：
+服务器本机始终同时提供：
   TCP/443：HTTP/1.1 + HTTP/2
   UDP/443：HTTP/3 / QUIC
 
 且两条路径都只允许 TLS 1.3。
+
+公网端口由 config.env 的 PUBLIC_HTTPS_PORT 指定，默认 443。路由器必须同时配置：
+  TCP/PUBLIC_HTTPS_PORT -> 服务器 TCP/443
+  UDP/PUBLIC_HTTPS_PORT -> 服务器 UDP/443
+
+使用非标准公网端口时填写 `PUBLIC_HTTPS_PORT=<PUBLIC_HTTPS_PORT>`，观众访问
+`https://live.example.com:<PUBLIC_HTTPS_PORT>/`，响应会通告相同端口的
+HTTP/3 Alt-Svc。若同时发布 HTTPS/SVCB RR，其 port 参数也必须与
+PUBLIC_HTTPS_PORT 一致；不要仍写 443。
+
+PUBLIC_HOST / WebRTC ICE
+-------------------------
+PUBLIC_HOST 必须填写公网 DNS 域名并拥有 IPv4 A 记录，而且不能有 AAAA。公网 IPv4 可以通过 DDNS 动态更新。若主站需要 IPv6，建议使用独立的 A-only WebRTC 子域名。
+示例：PUBLIC_HOST=live.example.com
+不要填写协议、端口或裸 IP；公网网页端口只写在 PUBLIC_HTTPS_PORT。
+start.sh 在 DNS 无法解析时会拒绝启动。

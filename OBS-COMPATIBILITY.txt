@@ -1,8 +1,8 @@
 OBS 32.2.1 软件编码器兼容配置
 ============================
 
-推流地址不绑定域名。以下地址中的 <网卡IP> 是 Debian 13 服务器监听 OBS 流量的
-IPv4，例如 192.168.1.10。TCP/8889 和 TCP/1935 只绑定该地址，不监听
+推流地址不绑定域名。以下地址中的 <LAN_IP> 是 Debian 13 服务器监听 OBS 流量的
+私网 IPv4。TCP/8889 和 TCP/1935 只绑定该地址，不监听
 0.0.0.0 或公网 IPv6。每次启动会读取该网卡的真实掩码，发布来源只允许该
 局域网网段和服务器本机 /32。
 
@@ -13,6 +13,10 @@ config.env 示例（推荐自动识别）：
 程序优先选择默认路由对应的已启用 RFC1918 网卡；多网卡时可用 WHIP_IP 指定
 某个本机私网地址。INGEST_ALLOW_CIDRS 是旧版兼容项，手工值会被忽略。
 
+OBS 可使用 24/25/30/50/60 等常用整数帧率。服务器的 LL-HLS 使用 1 秒 CMAF
+part 和约 2 秒媒体段，因此这些帧率都能在整帧边界形成稳定 part；尤其不会再因
+24 FPS 取整而让相邻 part 时长交替变化。
+
 一、WHIP（首选）
 ----------------
 
@@ -20,7 +24,7 @@ config.env 示例（推荐自动识别）：
   WHIP
 
 Server：
-  http://<网卡IP>:8889/live/whip
+  http://<LAN_IP>:8889/live/whip
 
 Bearer Token：
   obs:<start.sh 显示的随机推流码>
@@ -56,7 +60,8 @@ AOM AV1：
   CPU Usage          realtime / 足以保持实时
 
 网页默认“自动”模式会从 HLS manifest 检测 av01。浏览器明确支持 MSE AV1 时
-先使用 LL-HLS；否则使用 https://<域名>/rtc/live/whep 建立 WHEP 播放。域名只
+先使用 LL-HLS；否则使用 https://<域名>[:PUBLIC_HTTPS_PORT]/rtc/live/whep
+建立 WHEP 播放。域名只
 用于网页播放，不参与 OBS 推流。
 
 二、RTMP 兼容入口
@@ -68,13 +73,13 @@ AOM AV1：
   自定义
 
 Server：
-  rtmp://<网卡IP>:1935
+  rtmp://<LAN_IP>:1935
 
 Stream key：
   live?user=obs&pass=<start.sh 显示的随机推流码>
 
 不要在 Stream key 的 pass 前添加 obs:。最终地址形如：
-  rtmp://192.168.1.10:1935/live?user=obs&pass=随机推流码
+  rtmp://<LAN_IP>:1935/live?user=obs&pass=<随机推流码>
 
 RTMP 可以保留 WebRTC 不接受的帧重排和时间戳结构，是 MediaMTX 对 OBS 的兼容
 发布路径。它是明文协议，只允许可信局域网/VPN 来源访问 TCP/1935。
@@ -106,7 +111,7 @@ v1.19.3-r8 修补构建：忽略空占位，等待后续有效 av1C；start.sh �
 MediaMTX v1.19.3-r8 还会归一化 OBS/libdatachannel 的 OBU size/extension 变体，并在
 真实 KEY_FRAME 缺少重复 sequence header 时补回启动时缓存的序列头。
 
-1. 保持播放器右上角为“自动”；也可分别点击“LL-HLS”和“WebRTC / AV1”诊断。
+1. 保持播放器右上角为“自动”；也可分别点击“LL-HLS”和“WebRTC / WHEP”诊断。
 2. 若 `/live/index.m3u8?cookieCheck=1` 连续返回 HTTP 500，自动模式会在三次
    HLS 服务端失败后改走 WHEP；手动 LL-HLS 模式仍保留清单重试，便于查看原始错误。
 3. 浏览器必须在 WebRTC SDP 中声明 AV1/90000；否则网页会显示明确错误。
@@ -115,17 +120,17 @@ MediaMTX v1.19.3-r8 还会归一化 OBS/libdatachannel 的 OBU size/extension �
 5. 可点“LL-HLS”单独测试浏览器的 HLS/MSE AV1 能力。
 6. 浏览器不具备 AV1 解码器时，服务器不会转码，只能换浏览器/设备或在 OBS
    改用 H.264。
-7. WHEP 连接后 12 秒仍无画面时，网页会区分“未收到 RTP”与“收到 RTP 但解码
+7. WHEP 连接后 18 秒仍无画面时，网页会区分“未收到 RTP”与“收到 RTP 但解码
    帧为 0”，分别指向 PUBLIC_HOST/NAT/8189 或 AV1 profile/bit-depth/解码器。
 
-五、WebRTC / AV1 无声音
+五、WebRTC / WHEP 无声音
 -----------------------
 
 1. 网页为了满足浏览器自动播放策略，初始必定静音；点击右上角“开启声音”。
-2. OBS 通过 WHIP 推送时，音频应为 Opus。播放器会把 WHEP 分别送达的 AV1
+2. OBS 通过 WHIP 推送时，音频应为 Opus。播放器会把 WHEP 分别送达的 AV1 / VP9
    视频轨和 Opus 音频轨合并到同一个 MediaStream，避免其中一轨覆盖另一轨。
 3. OBS 通过 RTMP 推送时，音频通常是 AAC。WebRTC/WHEP 不支持 AAC，因此可能
-   只有 AV1 画面；请切到 LL-HLS，或改用 OBS WHIP 发送 Opus。
+   只有 AV1 / VP9 画面；请切到 LL-HLS，或改用 OBS WHIP 发送 Opus。
 4. 如果 WHEP 会话没有任何音频轨，网页会明确提示检查 OBS 音轨是否启用/静音。
 5. 本包保持零转码，不会把 AAC 自动转换为 Opus。
 

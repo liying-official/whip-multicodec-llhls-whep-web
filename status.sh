@@ -1,12 +1,10 @@
 #!/bin/sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 PUBLIC_DOMAIN=
-TLS_CERT=certs/fullchain.pem
-TLS_KEY=certs/privkey.pem
+PUBLIC_HTTPS_PORT=443
 WHIP_IP=
 PUBLIC_HOST=
-CONFIGURED_INGEST_ALLOW_CIDRS=
 INGEST_ALLOW_CIDRS=
 INGEST_INTERFACE=
 load_config() {
@@ -28,16 +26,32 @@ load_config() {
     config_seen="$config_seen $config_key"
     case "$config_key" in
       PUBLIC_DOMAIN) PUBLIC_DOMAIN=$config_value ;;
-      TLS_CERT) TLS_CERT=$config_value ;;
-      TLS_KEY) TLS_KEY=$config_value ;;
+      PUBLIC_HTTPS_PORT) PUBLIC_HTTPS_PORT=$config_value ;;
+      TLS_CERT|TLS_KEY) : ;;
       WHIP_IP) WHIP_IP=$config_value ;;
       PUBLIC_HOST) PUBLIC_HOST=$config_value ;;
-      INGEST_ALLOW_CIDRS) CONFIGURED_INGEST_ALLOW_CIDRS=$config_value ;;
+      INGEST_ALLOW_CIDRS) : ;;
       *) echo "config.env 包含未知配置项：$config_key" >&2; exit 1 ;;
     esac
   done < "$config_file"
 }
 load_config "$ROOT/config.env"
+PUBLIC_HTTPS_PORT_VALID=1
+case "$PUBLIC_HTTPS_PORT" in
+  ""|*[!0-9]*|0*) PUBLIC_HTTPS_PORT_VALID=0 ;;
+esac
+if [ "$PUBLIC_HTTPS_PORT_VALID" -eq 1 ] \
+   && { [ "${#PUBLIC_HTTPS_PORT}" -gt 5 ] \
+        || [ "$PUBLIC_HTTPS_PORT" -gt 65535 ]; }; then
+  PUBLIC_HTTPS_PORT_VALID=0
+fi
+if [ "$PUBLIC_HTTPS_PORT_VALID" -ne 1 ]; then
+  PUBLIC_ORIGIN="INVALID(PUBLIC_HTTPS_PORT=$PUBLIC_HTTPS_PORT)"
+elif [ "$PUBLIC_HTTPS_PORT" = 443 ]; then
+  PUBLIC_ORIGIN="https://${PUBLIC_DOMAIN:-未配置}"
+else
+  PUBLIC_ORIGIN="https://${PUBLIC_DOMAIN:-未配置}:$PUBLIC_HTTPS_PORT"
+fi
 if [ -r "$ROOT/runtime/ingest.detected" ]; then
   while IFS= read -r detected_line || [ -n "$detected_line" ]; do
     case "$detected_line" in
@@ -88,14 +102,21 @@ show_tcp() {
   if "$HELPER" tcp --addr "$addr" --timeout 500ms >/dev/null 2>&1; then s=LISTENING; else s='NOT LISTENING'; fi
   printf '%-18s: %s\n' "$name" "$s"
 }
+show_pid MTX-Supervisor "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh"
 show_pid MediaMTX "$ROOT/runtime/mediamtx.pid" "$ROOT/bin/mediamtx"
 show_pid Gateway "$ROOT/runtime/gateway.pid" "$HELPER"
 show_pid Caddy-HTTPS "$ROOT/runtime/caddy.pid" "$ROOT/bin/caddy"
+if command -v systemctl >/dev/null 2>&1 \
+   && systemctl list-unit-files obs-whip-live.service >/dev/null 2>&1; then
+  systemd_state=$(systemctl is-active obs-whip-live.service 2>/dev/null || true)
+  printf '%-18s: %s\n' 'systemd unit' "${systemd_state:-unknown}"
+fi
 show_tcp 'WHIP 8889/TCP' "$WHIP_IP:8889"
 show_tcp 'RTMP 1935/TCP' "$WHIP_IP:1935"
 show_tcp 'WebRTC 8189/TCP' "$WHIP_IP:8189"
 show_tcp 'HLS 8888/TCP' '127.0.0.1:8888'
 show_tcp 'Gateway 8080/TCP' '127.0.0.1:8080'
+show_tcp 'Metrics 9998/TCP' '127.0.0.1:9998'
 show_tcp 'Public 443/TCP' '127.0.0.1:443'
 if command -v ss >/dev/null 2>&1; then
   if ss -H -lun 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:443[[:space:]]'; then s=LISTENING; else s='NOT LISTENING'; fi
@@ -106,5 +127,22 @@ if command -v ss >/dev/null 2>&1; then
   printf '%-18s: %s\n' 'WebRTC 8189/UDP' "$s"
 fi
 
+printf '%-18s: %s\n' 'Public origin' "$PUBLIC_ORIGIN/"
+if [ "$PUBLIC_HTTPS_PORT_VALID" -eq 1 ]; then
+  printf '%-18s: %s\n' 'External mapping' "TCP/UDP $PUBLIC_HTTPS_PORT -> local 443"
+else
+  printf '%-18s: %s\n' 'External mapping' "INVALID PUBLIC_HTTPS_PORT"
+fi
 printf '%-18s: %s\n' 'Ingest interface' "$INGEST_INTERFACE ($WHIP_IP)"
 printf '%-18s: %s\n' 'Ingest allow CIDRs' "$INGEST_ALLOW_CIDRS"
+if [ -n "${PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
+  status_host_a=$(getent ahostsv4 "$PUBLIC_HOST" 2>/dev/null | awk 'NF > 0 && !seen[$1]++ { if (out != "") out=out ","; out=out $1 } END { print out }' || true)
+  status_host_aaaa=$(getent ahostsv6 "$PUBLIC_HOST" 2>/dev/null | awk 'NF > 0 && $1 ~ /:/ && $1 !~ /^::ffff:/ && !seen[$1]++ { if (out != "") out=out ","; out=out $1 } END { print out }' || true)
+  if [ -n "$status_host_a" ] && [ -z "$status_host_aaaa" ]; then
+    printf '%-18s: %s\n' 'WebRTC DDNS' "PASS ($PUBLIC_HOST -> $status_host_a; AAAA none)"
+  elif [ -n "$status_host_aaaa" ]; then
+    printf '%-18s: %s\n' 'WebRTC DDNS' "FAIL ($PUBLIC_HOST has AAAA: $status_host_aaaa)"
+  else
+    printf '%-18s: %s\n' 'WebRTC DDNS' "FAIL ($PUBLIC_HOST A unresolved)"
+  fi
+fi

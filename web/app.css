@@ -15,6 +15,30 @@ html, body {
       background: #000;
     }
 
+    #codecSupport {
+      position: fixed;
+      left: max(12px, env(safe-area-inset-left));
+      top: max(12px, env(safe-area-inset-top));
+      z-index: 15;
+      max-width: min(760px, calc(100vw - 24px));
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 7px;
+      color: #e8edf5;
+      background: rgba(0,0,0,.68);
+      backdrop-filter: blur(8px);
+      font: 12px/1.35 system-ui, sans-serif;
+      pointer-events: none;
+    }
+
+    #codecSupport[data-state="unsupported"] {
+      border-color: rgba(255,120,120,.55);
+    }
+
+    #codecSupport[data-state="checking"] {
+      opacity: .82;
+    }
+
     #status {
       position: fixed;
       left: 12px;
@@ -86,6 +110,13 @@ html, body {
         left: 8px;
         right: 8px;
         justify-content: center;
+      }
+
+      #codecSupport {
+        top: 58px;
+        left: 8px;
+        right: 8px;
+        max-width: none;
       }
 
       #modebar button {

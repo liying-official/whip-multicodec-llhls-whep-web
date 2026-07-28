@@ -10,9 +10,9 @@
 		# Disable QUIC 0-RTT replay-prone early data.
 		0rtt off
 
-		# Reject mismatched SNI/Host combinations.
-		strict_sni_host on
-
+		# Host/SNI mismatch is rejected in the request handler below instead of
+		# strict_sni_host. Caddy's early strict_sni_host 421 response is emitted
+		# before site header handlers and therefore exposes its Server header.
 		max_header_size 16384
 
 		timeouts {
@@ -22,11 +22,11 @@
 	}
 }
 
-https://__PUBLIC_DOMAIN__ {
-	tls "__TLS_CERT__" "__TLS_KEY__" {
-		# TLS 1.3 only. No TLS 1.2 fallback.
-		protocols tls1.3 tls1.3
-	}
+(security_headers) {
+	# Caddy sets its local listener port before request handlers run. Keep this
+	# operation in a separate, immediate header handler so it overwrites that
+	# automatic value before the deferred Server/Via deletion below.
+	header Alt-Svc "h3=\":__PUBLIC_HTTPS_PORT__\"; ma=2592000"
 
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -44,11 +44,44 @@ https://__PUBLIC_DOMAIN__ {
 		X-Permitted-Cross-Domain-Policies "none"
 
 		-Server
+		-Via
+	}
+}
+
+https://:443 {
+	tls "__TLS_CERT__" "__TLS_KEY__" {
+		# TLS 1.3 only. No TLS 1.2 fallback.
+		protocols tls1.3 tls1.3
 	}
 
+	# Strict Host/SNI enforcement runs inside the normal HTTP handler chain so
+	# 421 responses can have Server/Via removed. This preserves
+	# the previous fail-closed Host/SNI behavior without Caddy fingerprint leakage.
+	@badSNI expression `{http.request.tls.server_name} != "__PUBLIC_DOMAIN__"`
+	@badHost not host __PUBLIC_DOMAIN__
+	handle @badSNI {
+		header {
+			-Alt-Svc
+			-Server
+			-Via
+		}
+		respond "" 421
+	}
+	handle @badHost {
+		header {
+			-Alt-Svc
+			-Server
+			-Via
+		}
+		respond "" 421
+	}
+
+	import security_headers
+
 	# Same-origin WHEP playback only. Publishing (/live/whip) is never routed
-	# through the public site. Restrict methods and SDP/ICE request bodies before
-	# proxying to the MediaMTX listener bound to the private ingest address.
+	# through the public site. Public WHEP requests go through the loopback Go
+	# gateway first so it can enforce per-IP creation and active-session limits,
+	# bind session control to the creating IP, and sanitize MediaMTX errors.
 	@whepCreate {
 		path /rtc/live/whep
 		method POST
@@ -57,33 +90,29 @@ https://__PUBLIC_DOMAIN__ {
 		request_body {
 			max_size 256KB
 		}
-		uri strip_prefix /rtc
-		reverse_proxy __INGEST_IP__:8889 {
+		reverse_proxy http://127.0.0.1:8080 {
 			flush_interval -1
-			header_up Host __INGEST_IP__
+			header_up Host 127.0.0.1
 			header_up -Authorization
 			header_up -Cookie
-			# MediaMTX sees /live/whep and returns that backend path in Location.
-			# Restore the public /rtc prefix for standards-compliant WHEP clients.
-			header_down Location "^/live/whep/(.*)$" "/rtc/live/whep/$1"
 		}
 	}
 
 	@whepSession {
 		path /rtc/live/whep/*
-		method PATCH DELETE
+		# POST is reserved for the player's lightweight same-origin session
+		# heartbeat (X-WHEP-Keepalive: 1). The Go gateway rejects other POSTs.
+		method POST PATCH DELETE
 	}
 	handle @whepSession {
 		request_body {
 			max_size 256KB
 		}
-		uri strip_prefix /rtc
-		reverse_proxy __INGEST_IP__:8889 {
+		reverse_proxy http://127.0.0.1:8080 {
 			flush_interval -1
-			header_up Host __INGEST_IP__
+			header_up Host 127.0.0.1
 			header_up -Authorization
 			header_up -Cookie
-			header_down Location "^/live/whep/(.*)$" "/rtc/live/whep/$1"
 		}
 	}
 
@@ -92,6 +121,14 @@ https://__PUBLIC_DOMAIN__ {
 	handle @whepInvalid {
 		header Allow "POST, PATCH, DELETE"
 		respond "method not allowed" 405
+	}
+
+	# Explicitly deny signalling-looking paths under /live. The public ingest
+	# endpoint is bound to the private WHIP interface only; these names must not
+	# fall through to the HLS wildcard and produce misleading cookie redirects.
+	@blockedLiveSignalling path /live/whip /live/whip/* /live/whep /live/whep/*
+	handle @blockedLiveSignalling {
+		respond 404
 	}
 
 	# Publicly allowed player/HLS paths.
@@ -118,15 +155,12 @@ https://__PUBLIC_DOMAIN__ {
 		respond 404
 	}
 
-	# Errors raised before the normal header middleware (for example a WHEP
-	# request body larger than 256 KiB) must not restore Caddy's Server header.
+	# Errors raised before the normal response chain (for example a WHEP
+	# request body larger than 256 KiB) receive the same complete security
+	# policy and external HTTP/3 advertisement as successful responses.
 	handle_errors {
-		header {
-			-Server
-			Cache-Control "no-store"
-			X-Content-Type-Options "nosniff"
-			Referrer-Policy "no-referrer"
-		}
+		import security_headers
+		header Cache-Control "no-store"
 		respond "" {err.status_code}
 	}
 }
