@@ -107,9 +107,24 @@ Stream key: live?user=obs&pass=<随机密码>
 如果公网使用非标准 HTTPS 端口，必须把同一个公网 TCP/UDP 端口映射到服务器
 TCP/UDP 443，并在 `PUBLIC_HTTPS_PORT` 中填写该公网端口。
 
+## R33 默认限流规则
+
+R33 的默认限流按安全网关识别到的真实来源 IP 分别计数：
+
+| 流量类型 | 默认规则 | 超限行为 |
+| --- | --- | --- |
+| Web 与 LL-HLS GET/HEAD | 每个 IP 每分钟 6,000 个请求（固定窗口） | HTTP 429，`Retry-After: 10` |
+| WHEP 会话创建 POST | 每个 IP 滚动窗口 10 次/10 秒且 30 次/60 秒 | HTTP 429 |
+| WHEP 活动会话 | 每个 IP 最多 5 个 | HTTP 429 |
+
+Web/LL-HLS 与 WHEP 限流表各自最多追踪 20,000 个来源 IP。WHEP create 在计入
+配额前必须先通过 `application/sdp` MIME 校验，请求体上限为 256 KiB；会话使用
+60 秒心跳，连续 5 分钟未刷新时回收。以上是 R33 内置默认值，不是公网带宽上限。
+
 ## 文档
 
 - [完整部署与运行说明](README.txt)
+- [R33 双轮压力测试报告（中文）](docs/pressure-test-report-r33-20260730-zh.md)
 - [OBS 编码器兼容参数](OBS-COMPATIBILITY.txt)
 - [编码与传输能力](CODEC-SUPPORT.txt)
 - [安全模型](SECURITY.txt)

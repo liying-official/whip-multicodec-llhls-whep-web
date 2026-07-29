@@ -114,6 +114,23 @@ The server cannot repair an overloaded OBS encoding queue.
 For a non-standard public HTTPS port, map the same public TCP and UDP port to
 local TCP and UDP 443, then set that public port in `PUBLIC_HTTPS_PORT`.
 
+## R33 default rate limits
+
+R33 applies the following built-in limits per real source IP identified by the
+secure gateway:
+
+| Traffic | Default rule | Over-limit response |
+| --- | --- | --- |
+| Web and LL-HLS GET/HEAD | 6,000 requests per IP per minute (fixed window) | HTTP 429 with `Retry-After: 10` |
+| WHEP session-create POST | 10 requests/10 seconds and 30 requests/60 seconds per IP (rolling windows) | HTTP 429 |
+| Active WHEP sessions | 5 per IP | HTTP 429 |
+
+The Web/LL-HLS and WHEP limiter tables can each track at most 20,000 source IPs.
+A WHEP create request must pass `application/sdp` MIME validation before it
+consumes quota, and its request body is limited to 256 KiB. Sessions use a
+60-second heartbeat and are reclaimed after five minutes without a refresh.
+These are R33's built-in request/session limits, not public bandwidth caps.
+
 ## Playback behavior
 
 - H.264 and HEVC normally use LL-HLS.
@@ -129,6 +146,7 @@ local TCP and UDP 443, then set that public port in `PUBLIC_HTTPS_PORT`.
 ## Documentation
 
 - [Detailed deployment and operation guide (Chinese)](README.txt)
+- [R33 dual-round load test report (English)](docs/pressure-test-report-r33-20260730-en.md)
 - [OBS encoder compatibility](OBS-COMPATIBILITY.txt)
 - [Codec and transport support](CODEC-SUPPORT.txt)
 - [Security model](SECURITY.txt)
