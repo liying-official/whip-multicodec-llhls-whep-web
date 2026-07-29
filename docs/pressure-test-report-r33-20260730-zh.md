@@ -157,8 +157,6 @@
 - 60 秒续播宽限结束后，`media_live=false`、`session_live=false`、`resume_grace_active=false`。
 - 两轮正式时间窗口的 systemd warning 数均为 0。
 - 两轮正式时间窗口的 OOM、TCP 内存耗尽、segfault、hung-task 等内核错误数均为 0。
-- 原始结果归档已下载，本机 SHA-256：
-  `aefbc22fd1ffee47045be1794dd49aff1554252b9d6c8bbde51d61211088599b`
 - 测试机中的推流、生成器、采样器、日志、PID、临时播放文件、归档和测试脚本均已删除。
 - 监控服务停止后删除主数据库、WAL 和 SHM，再启动服务重建空库。
 - 清理完成后 R33 和监控服务均为 `active` 且 `enabled`，直播状态为离线。
