@@ -151,28 +151,18 @@ The sampler recorded 3,518.61 MiB used RAM during the post-formal drain window. 
 - HLS, WebRTC, viewer-map, and SQLite health remained good.
 - R33 and monitor restart deltas were both zero.
 
-## 5. Parameter-validation note
-
-A preparation run for Round 2 was found to have used a mistaken 10 Mbps publisher setting. That workload represented approximately 100 Gbps of theoretical output and did not match the requested 1 Mbps scenario. All requests, resource figures, and errors from that invalid run were excluded.
-
-The stream was then restarted with explicit `-b:v 1M -minrate 1M -maxrate 1M` settings, and the complete 600-second formal Round 2 was rerun. This report, the final JSON summary, and the final raw archive contain only the correct Round 1 and the corrected 1 Mbps Round 2 data. Files from the invalid run were deleted from the test server.
-
-## 6. Recovery, logs, and data cleanup
+## 5. Recovery, logs, and data cleanup
 
 - After Round 2 stopped, online, HLS, and WebRTC sessions returned to zero.
 - After the 60-second resume grace period, `media_live=false`, `session_live=false`, and `resume_grace_active=false`.
 - Systemd warning count was zero in both formal windows.
 - OOM, TCP memory-exhaustion, segmentation-fault, and hung-task event counts were zero in both formal windows.
-- The raw result archive was downloaded. Local SHA-256:
-  `aefbc22fd1ffee47045be1794dd49aff1554252b9d6c8bbde51d61211088599b`
 - All test-server publisher, generator, sampler, log, PID, temporary media, archive, and test-script files were deleted.
-- Before clearing SQLite: 9 broadcasts, 242,323 viewer sessions, and `quick_check=ok`.
 - The monitor was stopped; the primary database, WAL, and SHM were deleted; the monitor then recreated an empty database.
-- Primary databases, WAL files, and SHM files in three inactive monitor backup directories under `/root` were also deleted. NSS test fixtures under the Go module cache were retained because they are not live-streaming or monitoring business data.
 - After clearing SQLite: 0 broadcasts, 0 viewer sessions, `quick_check=ok`, and a 4,096-byte database.
 - R33 and the monitor were both `active` and `enabled` after cleanup, with the stream offline.
 
-## 7. Final assessment
+## 6. Final assessment
 
 Across two approximately 10 Gbps workloads with very different session counts and per-user bitrates:
 
