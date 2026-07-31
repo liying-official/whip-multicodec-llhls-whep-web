@@ -11,6 +11,7 @@
 
 音频：
   Opus（WHIP / WHEP）
+  WHEP 播放器会显式协商 Opus stereo/sprop-stereo，双声道输入应在 Chromium 中保持左右声道
   AAC 等 OBS RTMP 实际协商的受支持音频（用于 LL-HLS）
 
 重要限制：

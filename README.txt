@@ -49,6 +49,7 @@ https://你的域名[:PUBLIC_HTTPS_PORT]/
 - Debian 13 amd64 / arm64 自动识别
 - H.264 / HEVC / AV1 / VP9 零视频转码
 - WHIP/WHEP Opus 音频；RTMP/AAC 由 LL-HLS 保留
+- WHEP Opus 显式协商 `stereo=1;sprop-stereo=1`，避免 Chromium 将双声道按单声道播放
 - WHIP 首帧等待提高到 15 秒，适配软件 x264 / SVT-AV1 启动延迟
 - RTMP/1935 软件编码器兼容入口
 - 随附 MediaMTX v1.19.3-r8：修复 AOM AV1 Enhanced RTMP 空 sequence-start，并归一化 OBS/libdatachannel 的 AV1 OBU

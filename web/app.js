@@ -334,6 +334,79 @@
     return null;
   }
 
+  // BEGIN R33 WHEP OPUS STEREO
+  // Chrome/Chromium can decode a two-channel Opus RTP stream as mono unless
+  // the SDP fmtp explicitly negotiates stereo. Keep this workaround local to
+  // the bundled WHEP player: the browser offer advertises stereo reception,
+  // and the MediaMTX answer is normalized to declare stereo transmission.
+  // Unknown fmtp parameters and the original SDP line-ending style are kept.
+  function ensureOpusStereoFmtp(sdp, includeSenderProperty = false) {
+    const original = String(sdp || "");
+    if (!original) return original;
+
+    const newline = original.includes("\r\n") ? "\r\n" : "\n";
+    const hadTrailingNewline = /(?:\r\n|\n)$/.test(original);
+    const lines = original.replace(/\r\n/g, "\n").split("\n");
+    if (hadTrailingNewline && lines[lines.length - 1] === "") lines.pop();
+
+    const opusPayloads = new Set();
+    for (const line of lines) {
+      const match = line.match(/^a=rtpmap:(\d+)\s+opus\/48000\/2(?:\s|$)/i);
+      if (match) opusPayloads.add(match[1]);
+    }
+    if (opusPayloads.size === 0) return original;
+
+    function normalizedFmtp(line, payload) {
+      const prefix = `a=fmtp:${payload}`;
+      const raw = line.slice(prefix.length).trim();
+      const params = raw ? raw.split(";").map(value => value.trim()).filter(Boolean) : [];
+      const output = [];
+      let hasStereo = false;
+      let hasSenderStereo = false;
+
+      for (const param of params) {
+        const equal = param.indexOf("=");
+        const name = (equal >= 0 ? param.slice(0, equal) : param).trim().toLowerCase();
+        if (name === "stereo") {
+          if (!hasStereo) output.push("stereo=1");
+          hasStereo = true;
+          continue;
+        }
+        if (name === "sprop-stereo") {
+          if (includeSenderProperty && !hasSenderStereo) output.push("sprop-stereo=1");
+          hasSenderStereo = true;
+          continue;
+        }
+        output.push(param);
+      }
+
+      if (!hasStereo) output.push("stereo=1");
+      if (includeSenderProperty && !hasSenderStereo) output.push("sprop-stereo=1");
+      return `${prefix} ${output.join(";")}`;
+    }
+
+    const fmtpPayloads = new Set();
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(/^a=fmtp:(\d+)(?:\s|$)/i);
+      if (!match || !opusPayloads.has(match[1])) continue;
+      lines[index] = normalizedFmtp(lines[index], match[1]);
+      fmtpPayloads.add(match[1]);
+    }
+
+    for (const payload of opusPayloads) {
+      if (fmtpPayloads.has(payload)) continue;
+      const rtpmapIndex = lines.findIndex(line =>
+        new RegExp(`^a=rtpmap:${payload}\\s+opus\\/48000\\/2(?:\\s|$)`, "i").test(line)
+      );
+      if (rtpmapIndex >= 0) {
+        lines.splice(rtpmapIndex + 1, 0, normalizedFmtp(`a=fmtp:${payload}`, payload));
+      }
+    }
+
+    return lines.join(newline) + (hadTrailingNewline ? newline : "");
+  }
+  // END R33 WHEP OPUS STEREO
+
   function isWhepUnsupportedCodecResponse(response, body) {
     if (!response || response.ok) return false;
     if (response.headers.get("X-WHEP-Error") === "unsupported-codec") return true;
@@ -1384,7 +1457,11 @@
     let createdSessionUrl = "";
     try {
       const offer = await connection.createOffer();
-      await connection.setLocalDescription(offer);
+      const stereoOffer = {
+        type: offer.type,
+        sdp: ensureOpusStereoFmtp(offer.sdp, false)
+      };
+      await connection.setLocalDescription(stereoOffer);
       await waitForIceGathering(connection, 5000);
       if (myGeneration !== generation) return;
 
@@ -1408,7 +1485,7 @@
         cache: "no-store",
         credentials: "same-origin"
       });
-      const answerSdp = await response.text();
+      let answerSdp = await response.text();
       if (!response.ok) {
         if (isWhepUnsupportedCodecResponse(response, answerSdp)) {
           codecFallbackTried = true;
@@ -1419,6 +1496,14 @@
         describeHttpError(response, answerSdp);
         throw new Error(publicWhepHttpError(response));
       }
+      // MediaMTX can return opus/48000/2 without explicit stereo fmtp.
+      // Normalize before setRemoteDescription so Chromium preserves the left
+      // and right channels instead of applying its historical mono default.
+      answerSdp = ensureOpusStereoFmtp(answerSdp, true);
+      video.dataset.whepOpusStereo = /a=fmtp:\d+[^\r\n]*\bstereo=1\b[^\r\n]*\bsprop-stereo=1\b/i.test(answerSdp)
+        ? "true"
+        : "false";
+
       if (!detectedCodec) {
         if (/\bAV1\/90000\b/i.test(answerSdp)) {
           setDetectedCodec("av01");

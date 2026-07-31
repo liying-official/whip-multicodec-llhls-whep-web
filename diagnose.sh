@@ -100,6 +100,12 @@ if [ -n "${PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
   fi
 fi
 printf '音频: WHIP/WHEP 使用 Opus；RTMP/AAC 请使用 LL-HLS；网页需点“开启声音”。\n'
+if grep -q 'BEGIN R33 WHEP OPUS STEREO' "$ROOT/web/app.js" \
+  && grep -q 'sprop-stereo=1' "$ROOT/web/app.js"; then
+  echo 'WHEP Opus 立体声协商: PASS - offer stereo=1 / answer stereo=1;sprop-stereo=1'
+else
+  echo 'WHEP Opus 立体声协商: FAIL - web/app.js 缺少 R33 stereo SDP 修复'
+fi
 printf 'DNS: PUBLIC_DOMAIN 可使用 A/AAAA；PUBLIC_HOST 必须 A-only；HTTPS/SVCB RR 为可选 HTTP/3 优化。\n\n'
 if [ -x "$ROOT/bin/mediamtx" ]; then
   printf 'MediaMTX: '

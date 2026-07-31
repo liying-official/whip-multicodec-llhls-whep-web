@@ -5,12 +5,13 @@
 面向 Debian 13 的低延迟、零视频转码直播边缘服务。OBS 通过可信局域网使用
 WHIP 或 RTMP 发布，浏览器通过公网 TLS 1.3 使用 LL-HLS 或 WHEP/WebRTC 播放。
 
-当前版本：**R33 Runtime Audit Fixes**
+当前版本：**R33 Stable（WHEP Opus 双声道修复版）**
 
 ## 主要特性
 
 - H.264、H.265/HEVC、AV1、VP9 零视频转码
 - WHIP/WHEP + Opus；RTMP + AAC/LL-HLS
+- WHEP 显式协商 Opus `stereo=1;sprop-stereo=1`，保持 Chromium 左右声道播放
 - LL-HLS 与 WHEP 自动能力检测、回退和编码热切换
 - HTTP/1.1、HTTP/2、HTTP/3；仅允许 TLS 1.3，禁用 QUIC 0-RTT
 - 支持 `PUBLIC_HTTPS_PORT`，公网 TCP/UDP 非标准端口可同时映射到本机 443

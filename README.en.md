@@ -6,12 +6,13 @@ A low-latency, zero-video-transcoding streaming edge for Debian 13. OBS
 publishes over WHIP or RTMP from a trusted LAN, while browsers play over public
 TLS 1.3 using LL-HLS or WHEP/WebRTC.
 
-Current release: **R33 Runtime Audit Fixes**
+Current release: **R33 Stable (WHEP Opus Stereo Fix)**
 
 ## Highlights
 
 - Zero-video-transcoding routing for H.264, H.265/HEVC, AV1, and VP9
 - WHIP/WHEP with Opus; RTMP with AAC retained through LL-HLS
+- Explicit WHEP Opus `stereo=1;sprop-stereo=1` negotiation preserves left/right playback in Chromium
 - Automatic LL-HLS/WHEP capability selection, fallback, and live codec changes
 - HTTP/1.1, HTTP/2, and HTTP/3 with TLS 1.3 only and QUIC 0-RTT disabled
 - `PUBLIC_HTTPS_PORT` support for matching public TCP/UDP port mappings to local 443

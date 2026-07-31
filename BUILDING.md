@@ -121,13 +121,15 @@ Before publishing:
 
 1. Regenerate `SHA256SUMS` for every managed file in the runtime archive.
 2. Run `go test ./...` for the helper and the focused patched upstream tests.
-3. Validate the generated MediaMTX and Caddy configurations.
-4. Test manual startup and the installed systemd service on Debian 13.
-5. Exercise WHIP and RTMP publishers plus LL-HLS and WHEP viewers.
-6. Verify HTTP/2, HTTP/3, TLS 1.3-only behavior, strict Host handling, request
+3. Run `node tests/whep-opus-stereo.test.js` to verify offer/answer Opus stereo
+   normalization, unknown fmtp preservation, and idempotence.
+4. Validate the generated MediaMTX and Caddy configurations.
+5. Test manual startup and the installed systemd service on Debian 13.
+6. Exercise WHIP and RTMP publishers plus LL-HLS and WHEP viewers.
+7. Verify HTTP/2, HTTP/3, TLS 1.3-only behavior, strict Host handling, request
    limits, security headers, and absence of `Server`/`Via`.
-7. Confirm all runtime scripts retain executable mode.
-8. Confirm the release archive contains no changelog or historical debug report.
+8. Confirm all runtime scripts retain executable mode.
+9. Confirm the release archive contains no changelog or historical debug report.
 
 Release changes belong in the GitHub Release description, not in the runtime
 archive.
