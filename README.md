@@ -125,7 +125,7 @@ Web/LL-HLS 与 WHEP 限流表各自最多追踪 20,000 个来源 IP。WHEP creat
 ## 文档
 
 - [完整部署与运行说明](README.txt)
-- [R33 双轮压力测试报告（中文）](docs/pressure-test-report-r33-20260730-zh.md)
+- [R33 双轮压力测试报告（中文）](docs/pressure-test-report-r33-zh.md)
 - [OBS 编码器兼容参数](OBS-COMPATIBILITY.txt)
 - [编码与传输能力](CODEC-SUPPORT.txt)
 - [安全模型](SECURITY.txt)
