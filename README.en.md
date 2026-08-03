@@ -147,7 +147,7 @@ These are R33's built-in request/session limits, not public bandwidth caps.
 ## Documentation
 
 - [Detailed deployment and operation guide (Chinese)](README.txt)
-- [R33 dual-round load test report (English)](docs/pressure-test-report-r33-20260730-en.md)
+- [R33 dual-round load test report (English)](docs/pressure-test-report-r33-en.md)
 - [OBS encoder compatibility](OBS-COMPATIBILITY.txt)
 - [Codec and transport support](CODEC-SUPPORT.txt)
 - [Security model](SECURITY.txt)
