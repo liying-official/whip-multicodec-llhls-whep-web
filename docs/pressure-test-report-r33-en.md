@@ -1,6 +1,5 @@
 # R33 Live Streaming and v25 Monitor Dual-Round Load Test Report
 
-Test date: 2026-07-30 (UTC+8)  
 Systems under test: R33 live-streaming service and v25 sidecar monitor  
 Test server: Debian 13, 16 vCPU, 7,943.41 MiB RAM, 1 GiB swap  
 Result: Both valid formal rounds passed. No new live-streaming or monitoring defect was found.
@@ -38,8 +37,7 @@ Overall test-server peaks across the two formal rounds:
 The CPU maximum occurred in Round 2. The RAM maximum occurred in the high-bitrate segment workload of Round 1.
 
 ## 3. Round 1: 2 × 100 users, 50 Mbps, 600 seconds
-
-Formal window: 2026-07-30 04:28:45–04:38:46 (UTC+8)  
+ 
 Generator hold times: 600.121 seconds each
 
 ### 3.1 Requests and bandwidth
@@ -93,7 +91,6 @@ Generator A recorded one 230.495 ms tail-latency outlier. Its p99 remained below
 
 ## 4. Round 2: 2 × 5,000 users, 1 Mbps, 600 seconds
 
-Formal window: 2026-07-30 05:09:17–05:19:18 (UTC+8)  
 Generator hold times: 600.636 and 600.659 seconds
 
 ### 4.1 Requests and bandwidth
