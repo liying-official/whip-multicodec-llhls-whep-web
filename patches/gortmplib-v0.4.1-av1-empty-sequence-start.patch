@@ -1,0 +1,83 @@
+diff --git a/pkg/message/msg_video_ex_sequence_start.go b/pkg/message/msg_video_ex_sequence_start.go
+index 4021e74..a3c0fea 100644
+--- a/pkg/message/msg_video_ex_sequence_start.go
++++ b/pkg/message/msg_video_ex_sequence_start.go
+@@ -32,6 +32,12 @@ func (m *VideoExSequenceStart) unmarshal(raw *rawmessage.Message) error {
+ 	switch m.FourCC {
+ 	case FourCCAV1:
+ 		m.AV1Config = &mp4.Av1C{}
++		// FFmpeg and OBS can emit an empty AV1 sequence-start placeholder
++		// before the sequence header is available. A second sequence-start
++		// containing the actual av1C box follows shortly afterwards.
++		if len(raw.Body) == 5 {
++			return nil
++		}
+ 		_, err := mp4.Unmarshal(bytes.NewReader(raw.Body[5:]), uint64(len(raw.Body[5:])), m.AV1Config, mp4.Context{})
+ 		if err != nil {
+ 			return fmt.Errorf("invalid AV1 configuration: %w", err)
+diff --git a/pkg/message/reader_test.go b/pkg/message/reader_test.go
+index 1c5cf9f..62ed3d3 100644
+--- a/pkg/message/reader_test.go
++++ b/pkg/message/reader_test.go
+@@ -876,6 +876,25 @@ func TestReader(t *testing.T) {
+ 	}
+ }
+ 
++func TestReaderAV1EmptySequenceStart(t *testing.T) {
++	buf := []byte{
++		0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x09,
++		0x01, 0x00, 0x00, 0x00, 0x80, 0x61, 0x76, 0x30,
++		0x31,
++	}
++
++	bc := bytecounter.NewReader(bytes.NewReader(buf))
++	r := NewReader(bc, bc, nil)
++	dec, err := r.Read()
++	require.NoError(t, err)
++	require.Equal(t, &VideoExSequenceStart{
++		ChunkStreamID:   6,
++		MessageStreamID: 0x1000000,
++		FourCC:          FourCCAV1,
++		AV1Config:       &mp4.Av1C{},
++	}, dec)
++}
++
+ func TestReaderNonStandardControlChunkStreamID(t *testing.T) {
+ 	buf := []byte{
+ 		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x04,
+diff --git a/reader.go b/reader.go
+index 5cb1f04..40fc4d0 100644
+--- a/reader.go
++++ b/reader.go
+@@ -299,6 +299,14 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
+ 			return fmt.Errorf("video track %d already setupped", trackID)
+ 		}
+ 
++		// FFmpeg and OBS publish an empty AV1 sequence-start while the encoder
++		// is still producing its sequence header. Ignore the placeholder and
++		// let the following sequence-start configure the track.
++		if msg.FourCC == message.FourCCAV1 &&
++			(msg.AV1Config == nil || len(msg.AV1Config.ConfigOBUs) == 0) {
++			return nil
++		}
++
+ 		var err error
+ 		videoTracks[trackID], err = videoTrackFromSequenceStart(msg)
+ 		if err != nil {
+diff --git a/reader_test.go b/reader_test.go
+index f49d5ed..8c4e785 100644
+--- a/reader_test.go
++++ b/reader_test.go
+@@ -637,6 +637,12 @@ func TestReadTracks(t *testing.T) {
+ 						},
+ 					},
+ 				},
++				&message.VideoExSequenceStart{
++					ChunkStreamID:   6,
++					MessageStreamID: 0x1000000,
++					FourCC:          message.FourCCAV1,
++					AV1Config:       &mp4.Av1C{},
++				},
+ 				&message.VideoExSequenceStart{
+ 					ChunkStreamID:   6,
+ 					MessageStreamID: 0x1000000,

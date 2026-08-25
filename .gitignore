@@ -1,0 +1,16 @@
+bin/*
+!bin/.gitkeep
+
+certs/*
+!certs/README.txt
+
+logs/*
+!logs/.keep
+
+runtime/*
+!runtime/.keep
+
+*.tar.gz
+*.sha256
+config.local.env
+

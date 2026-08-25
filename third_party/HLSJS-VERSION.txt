@@ -1,0 +1,25 @@
+hls.js R33 vendored asset record
+================================
+
+Version:
+  hls.js v1.6.16
+
+Upstream:
+  https://github.com/video-dev/hls.js
+  npm package: hls.js@1.6.16
+
+Runtime asset:
+  web/hls.min.js
+
+Verification:
+  The npm dist.integrity SHA-512 value was verified before the distribution
+  file was bundled.
+
+SHA-256:
+  442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0
+
+Runtime behavior:
+  R33 serves this file locally and does not download hls.js during startup.
+
+License:
+  See HLSJS-LICENSE.txt.

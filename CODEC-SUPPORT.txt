@@ -1,0 +1,81 @@
+编码与传输兼容性
+================
+
+服务器端不进行视频转码。
+
+视频：
+  H.264 / AVC
+  H.265 / HEVC
+  AV1
+  VP9
+
+音频：
+  Opus（WHIP / WHEP）
+  WHEP 播放器会显式协商 Opus stereo/sprop-stereo，双声道输入应在 Chromium 中保持左右声道
+  AAC 等 OBS RTMP 实际协商的受支持音频（用于 LL-HLS）
+
+重要限制：
+  WebRTC/WHEP 支持 Opus，不支持 AAC。OBS 通过 WHIP 推流通常是 Opus，可在网页
+  点“开启声音”后播放；OBS 通过 RTMP 推流通常是 AAC，WHEP 可能只有视频，需使用
+  LL-HLS。此包不做音频转码。
+
+推流入口（仅启动识别出的同网段局域网和服务器本机）：
+  WHIP  http://<网卡IP>:8889/live/whip
+  RTMP  rtmp://<网卡IP>:1935
+
+8889/1935 只绑定启动识别出的 WHIP_IP；发布账号同时检查随机密码和该网卡
+的真实局域网段 + WHIP_IP/32 本机地址。公网网页不会代理 /live/whip。公网 WHEP
+信令使用 `https://<域名>[:PUBLIC_HTTPS_PORT]/rtc/live/whep`，媒体使用可选的
+UDP/TCP 8189 加密通道，不会扩大发布权限。
+
+WHIP / WebRTC 限制：
+  - H.264 B 帧不属于 WebRTC 兼容负载，必须关闭 B 帧。
+  - OBS 32.2.1 的 WHIP 服务会为 x264 请求 bf=0 和 repeat_headers。
+  - OBS 32.2.1 的 SVT-AV1 只有在 CBR 下才应用 low-delay P 预测结构。
+  - 软件编码器首帧可能很慢；本包把服务器等待从上游默认 2 秒提高到 15 秒。
+  - AOM AV1 的关键帧间隔必须为 1～2 秒，不能使用 0/自动；否则 HLS 无法形成独立分片。
+  - MediaMTX v1.19.3-r8 会归一化 AV1 OBU，并只在真实 KEY_FRAME 前恢复缓存的序列头。
+
+RTMP 兼容入口：
+  - 当 x264/SVT-AV1 在 WHIP 下仍自动断开时使用。
+  - 可容纳不适合 WebRTC 的帧重排/时间戳结构。
+  - 本包随附 MediaMTX v1.19.3-r8：AOM AV1/Enhanced RTMP 在真正的 av1C
+    到达前发送空 sequence-start 时会等待后续配置，不再以 EOF 断开。
+  - 不会解决 OBS 本机 CPU 不足或编码队列超过 5 秒的问题。
+
+网页输出：
+  H.264 / HEVC  -> 默认 Low-Latency HLS / CMAF
+  VP9 + AAC     -> 浏览器支持 MSE VP9 时可使用 LL-HLS，保留声音
+  VP9 + Opus    -> 可使用 WHEP / WebRTC
+  VP9 无 MSE    -> 自动回退 WHEP / WebRTC
+  AV1 + AAC     -> 浏览器支持 MSE AV1 时优先 LL-HLS，保留声音
+  AV1 + Opus    -> 可使用 WHEP / WebRTC
+  AV1 无 MSE    -> 自动回退 WHEP / WebRTC
+  HLS 连续 5xx  -> 自动回退 WHEP / WebRTC（手动 HLS 仍可诊断）
+  当前无直播    -> 自动模式按 5/10/20/30/60 秒退避探测；手动 HLS 保留诊断重试
+
+每次新建 WHEP 会话前，网页都会重新读取当前 HLS 主清单。发布者断开并改用另一
+视频编码重连时，编码标签、能力检测和 fallback 决策会随新会话刷新，不需要
+观众手工重新加载页面。
+
+LL-HLS 使用约 2 秒媒体段与 1 秒 CMAF part。1 秒对 24/25/30/50/60 等常用整数
+帧率都是整帧周期，可避免 24 FPS 下 part 时长交替取整造成的 iOS 兼容性警告。
+
+网页从 HLS manifest 识别：
+  avc1 / avc3 -> H.264
+  hvc1 / hev1 -> HEVC
+  av01        -> AV1
+  vp09        -> VP9
+  mp4a        -> AAC
+  opus        -> Opus
+
+右上角可手动选择“LL-HLS”或“WebRTC / WHEP”。客户端仍必须具备当前编码的
+解码能力；若无画面/声音，网页会显示具体的 HLS、MSE、HTTP、WebRTC、静音、
+缺少音频轨或 AAC/WHEP 不兼容信息。
+
+
+VP9 说明：
+  - MediaMTX v1.19.3-r8 可原样路由 VP9，并生成 vp09 CMAF/LL-HLS。
+  - WHEP 使用 SDP `VP9/90000` 协商；浏览器必须声明 VP9 WebRTC 接收能力。
+  - LL-HLS 使用实际 manifest 的 `vp09...` codec string 做精确 MSE/MediaCapabilities 检测。
+  - 服务器不做 VP9 转码；不支持 VP9 的客户端会在自动模式尝试另一条播放路径。

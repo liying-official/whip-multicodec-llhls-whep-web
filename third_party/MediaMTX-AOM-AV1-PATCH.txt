@@ -1,0 +1,59 @@
+MediaMTX AOM AV1 RTMP / WHIP / HLS compatibility patch
+==========================================================
+
+Bundled application base:
+  MediaMTX v1.19.3
+
+Patched dependency base:
+  github.com/bluenviron/gortmplib v0.4.1
+
+Build version:
+  v1.19.3-r8
+
+Problems fixed:
+  1. FFmpeg and OBS AOM AV1 can emit an Enhanced RTMP video sequence-start
+     containing only the AV1 FourCC ("av01"). Upstream gortmplib v0.4.1
+     attempts to decode the empty av1C body and closes the publisher with EOF.
+  2. OBS 32.2.1 uses libdatachannel v0.24.2. Its AV1 RTP packetizer can retain
+     the OBU size field, mishandle extension headers, or omit the OBU base
+     header. MediaMTX then either destroys the HLS muxer, returns an empty 500,
+     or cannot recognize AV1 random-access units.
+  3. Some AV1 senders do not repeat the sequence header on every key frame.
+     gohlslib uses the sequence header as its AV1 random-access marker, so the
+     HLS segment can grow until hlsSegmentMaxSize is reached.
+
+Patch:
+  1. Accept a five-byte AV1 Enhanced RTMP sequence-start as an empty placeholder.
+  2. Wait for the later valid av1C before configuring the RTMP AV1 track.
+  3. Normalize WebRTC AV1 OBU size fields and base-layer extension headers.
+  4. Reconstruct the known libdatachannel <=0.24.3 missing-base-header form.
+  5. Drop invalid or enhancement-layer OBUs instead of crashing every HLS reader.
+  6. Parse AV1 frame_type, cache the startup sequence header, and restore it only
+     before an actual KEY_FRAME when the sender omitted the repeated header.
+
+Encoder requirement:
+  HLS/CMAF still requires real random-access frames. In OBS AOM AV1, set
+  Keyframe Interval to 1-2 seconds (2 seconds tested). Do not use 0/automatic.
+  The server does not transcode and cannot manufacture a missing key frame.
+
+Upstream libdatachannel references (unreleased after v0.24.3 at package time):
+  https://github.com/paullouisageneau/libdatachannel/commit/78fea5758e953421c105cd5023b96187c52dcf78
+  https://github.com/paullouisageneau/libdatachannel/commit/9822391551f1a7f8cd13a25f87b6b744f963f882
+
+Regression coverage:
+  - Raw Enhanced RTMP empty AV1 sequence-start decoding.
+  - Empty placeholder followed by a valid av1C track configuration.
+  - AV1 OBU size, extension, enhancement-layer, invalid-size, and
+    libdatachannel missing-base-header normalization tests.
+  - Cached sequence-header restoration only on parsed KEY_FRAME units.
+  - OBS-like AOM WHIP publisher that sends the sequence header only once.
+  - AV1+Opus LL-HLS six-second decode with 180 decoded video frames.
+  - Live 1920x1080 AOM AV1+Opus WHIP, HLS, WHEP, public TLS, and browser tests.
+
+Bundled binary SHA-256:
+  amd64  d40394a61ac80a8b465d31c7a01241a13449623610a46018437007bc6aa2abcd
+  arm64  e95a3ac205300c8afacb037aa263d2b53597326e301e6850e46b1b1de431a012
+
+Licenses:
+  MediaMTX-LICENSE.txt
+  gortmplib-LICENSE.txt
