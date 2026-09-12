@@ -1649,8 +1649,8 @@ func TestWhepGatewayReleasesLocalCandidateOnlyToPrivateRequester(t *testing.T) {
 	}{
 		{name: "lan through caddy", remoteAddr: "127.0.0.1:40000", xff: "10.23.45.20", wantLocal: true},
 		{name: "lan direct peer", remoteAddr: "10.23.45.20:40000", wantLocal: true},
-		{name: "public through caddy", remoteAddr: "127.0.0.1:40000", xff: "58.255.83.41", wantLocal: false},
-		{name: "public direct peer", remoteAddr: "58.255.83.41:40000", wantLocal: false},
+		{name: "public through caddy", remoteAddr: "127.0.0.1:40000", xff: "198.51.100.23", wantLocal: false},
+		{name: "public direct peer", remoteAddr: "198.51.100.23:40000", wantLocal: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gateway := newWhepGateway(target,

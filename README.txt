@@ -58,13 +58,13 @@ OBS
 sha256sum）、常用 shell 工具和 tar / gzip；服务安装还需要运行中的 systemd、
 systemd-analyze、systemd-notify、systemctl 和 flock。使用预编译包无需安装 Go。
 
-1. 从 GitHub Releases（https://github.com/liying-official/obs-whip-multicodec-llhls-web/releases）
+1. 从 GitHub Releases（https://github.com/liying-official/whip-multicodec-llhls-whep-web/releases）
    下载 v1.35 完整运行包及同一发布提供的 .sha256 文件。以下命令使用本次交付的规范文件名；
    文件名中的平台与构建标签不表示发行版兼容范围。
 2. 在下载目录执行下列命令。此流程仅适用于 /opt/obs-whip-live 不存在的首次安装；
    已有部署使用后面的“卸载与重装”流程。目录已存在时 mkdir 会失败，不能继续覆盖解压。
    set -eu
-   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
    sha256sum -c "$archive.sha256"
    sudo mkdir -m 0755 /opt/obs-whip-live
    sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
@@ -136,7 +136,7 @@ sudo ./uninstall.sh --purge 会删除项目目录，不可用于保留数据的�
 以外的自定义证书路径，须在安装前单独恢复这些证书/私钥并核验所有权和权限；不要恢复
 旧代码、模板或其他受管文档。恢复配置后仍需确认域名、端口和网卡符合当前环境。
 set -eu
-archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
 cd "$(dirname "$archive")"
 sha256sum -c "$(basename "$archive").sha256"
 sudo mkdir -m 0700 /opt/obs-whip-live-backup
@@ -276,9 +276,9 @@ WHIP_IP 候选。其他公网地址、IPv6、mDNS 和畸形候选不会返回。
 - 源码构建（BUILDING.md）
 
 简要更新内容见仓库的中文更新日志：
-https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.md
+https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.md
 英文更新日志：
-https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.en.md
+https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.en.md
 以及对应 GitHub Release 页面。详细更新与测试记录保留在本地；完整运行包不包含
 更新日志或详细报告。
 

@@ -25,6 +25,22 @@ output_archive=$(readlink -m -- "$1")
 output_dir=$(dirname -- "$output_archive")
 archive_name=$(basename -- "$output_archive")
 
+# Reject special metadata before any content read or temporary output. The
+# source manifest/config may be absent: staging regenerates/normalizes them.
+require_regular_metadata() {
+  [[ -f "$source_dir/$1" && ! -L "$source_dir/$1" ]] \
+    || fail "$1 must be a regular, non-symlink file"
+}
+for metadata in tools/release-basename.txt README.md README.en.md BUILDING.md \
+  VERSION.txt certs/README.txt tools/release-managed-files.txt; do
+  require_regular_metadata "$metadata"
+done
+for metadata in SHA256SUMS config.env; do
+  if [[ -e "$source_dir/$metadata" || -L "$source_dir/$metadata" ]]; then
+    require_regular_metadata "$metadata"
+  fi
+done
+
 [[ $archive_name == *.tar.gz ]] || fail "output name must end in .tar.gz"
 release_root=${archive_name%.tar.gz}
 [[ $release_root =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || fail "unsafe release root name"
@@ -129,6 +145,8 @@ executable_files=(
   tests/diagnose-exit-status.test.sh
   tests/dns-resolution.test.sh
   tests/install-systemd-trust.test.sh
+  tests/package-release-preflight.test.sh
+  tests/stop-clear-authorization.test.sh
   tests/whep-runtime.test.sh
   tools/package-release.sh
 )

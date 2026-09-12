@@ -216,7 +216,7 @@ explicit mode allowlist. Keep the established package epoch:
 
 ```sh
 SOURCE_DATE_EPOCH=1788652800 bash tools/package-release.sh \
-  ../release/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz
+  ../release/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz
 ```
 
 The official packager regenerates SHA256SUMS in the output archive and normalizes
@@ -282,8 +282,8 @@ and symbol findings for that same advisory; these are not zero-warning binaries.
 The database has no fixed version for that unmaintained OpenPGP API. JSON-mode
 exit status 0 means the scan completed; the finding records determine its result.
 
-Runtime acceptance, live weak-network playback and their coverage limits are
-recorded in the accompanying upgrade report. Unit tests, the local
+Detailed runtime and weak-network records, including coverage limits, are
+retained locally; published release notes summarize their scope. Unit tests, the local
 STUN fixture and static binary checks do not substitute for those runtime results.
 
 以下是 2026-09-12 使用 Go 1.27.1 完成的验证记录，不表示本次文档整理重新执行了运行测试：
@@ -300,7 +300,7 @@ STUN fixture and static binary checks do not substitute for those runtime result
 
 govulncheck v1.8.0 使用 Go 1.27.1 和更新至 2026-09-10T14:48:42Z 的数据库。helper 源码和两个二进制无发现。MediaMTX（`.`）和 Caddy（`./cmd/caddy`）源码入口仅报告 x/crypto v0.56.0 的模块级 GO-2026-5932，没有受影响导入包或可调用符号发现。两个组件的每个二进制仍有同一公告的 OpenPGP 包/符号发现，不能称为零警告；数据库未提供该停止维护 API 的修复版本。JSON 模式退出 0 仅表示扫描完成，结论必须依据 finding 记录。
 
-运行时、真实弱网及其覆盖限制见随附升级报告。单元测试、本地 STUN 夹具和静态二进制检查不能替代运行时结果。下表中英文共用，哈希对应当前随包二进制。
+运行时、真实弱网及其覆盖限制的详细记录保留在本地，公开更新摘要说明发布范围。单元测试、本地 STUN 夹具和静态二进制检查不能替代运行时结果。下表中英文共用，哈希对应当前随包二进制。
 
 | 二进制 / Binary | SHA-256 |
 |---|---|

@@ -101,7 +101,14 @@ if [ "$PRESERVE_FLAG" -eq 0 ] \
         echo "请检查：journalctl -u $UNIT_NAME -n 50" >&2
       fi
       if [ "$CLEAR_CREDENTIALS" -eq 1 ]; then
-        cleanup_credential
+        # Clearing a persistent credential requires the same complete stopped
+        # state used by uninstall, including PID and cgroup verification.
+        if [ "$SYSTEMD_STOP_STATE_OK" -eq 1 ] && unit_ownership_verify_stopped "$UNIT_NAME"; then
+          cleanup_credential
+        else
+          SYSTEMD_STOP_STATE_OK=0
+          echo "警告：未确认服务完整停止；持久推流凭据已保留。" >&2
+        fi
       fi
       if [ "$STOP_CLEANUP_FAILED" -ne 0 ]; then
         echo "受管进程停止流程已完成，但运行目录清理不完整；请检查上述警告。" >&2
@@ -225,7 +232,12 @@ stop_one "$ROOT/runtime/mediamtx.pid" "$MEDIAMTX" "$ROOT/bin/mediamtx"
 cleanup_remove "$ROOT/runtime/mediamtx.stop"
 cleanup_remove "$ROOT/runtime/mediamtx.generated.yml" "$ROOT/runtime/Caddyfile"
 if [ "$CLEAR_CREDENTIALS" -eq 1 ]; then
-  cleanup_credential
+  # Attempt every managed stop and required cleanup before authorizing clear.
+  if [ "$STOP_CLEANUP_FAILED" -eq 0 ]; then
+    cleanup_credential
+  else
+    echo "警告：停止或清理未完整成功；持久推流凭据已保留。" >&2
+  fi
 fi
 if [ "$STOP_CLEANUP_FAILED" -ne 0 ]; then
   echo "受管进程停止流程已完成，但运行目录清理不完整；请检查上述警告。" >&2

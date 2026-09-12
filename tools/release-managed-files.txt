@@ -50,7 +50,9 @@ tests/dns-resolution.test.sh
 tests/fixtures/whip-av1-sequences.bin
 tests/hls-weak-network-policy.test.js
 tests/install-systemd-trust.test.sh
+tests/package-release-preflight.test.sh
 tests/player-lifecycle.test.js
+tests/stop-clear-authorization.test.sh
 tests/whep-opus-stereo.test.js
 tests/whep-runtime.test.sh
 third_party/Caddy-BUILD.txt

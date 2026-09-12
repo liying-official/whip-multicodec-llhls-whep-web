@@ -57,7 +57,7 @@ OBS
 `sha256sum`）、常用 shell 工具和 `tar` / `gzip`；服务安装还需要运行中的 systemd、
 `systemd-analyze`、`systemd-notify`、`systemctl` 和 `flock`。使用预编译包无需安装 Go。
 
-1. 从 [GitHub Releases](https://github.com/liying-official/obs-whip-multicodec-llhls-web/releases)
+1. 从 [GitHub Releases](https://github.com/liying-official/whip-multicodec-llhls-whep-web/releases)
    下载 v1.35 完整运行包及同一发布提供的 `.sha256` 文件。以下命令使用本次交付的规范文件名；
    文件名中的平台与构建标签不表示发行版兼容范围。
 2. 在下载目录执行下列命令。此流程仅适用于 `/opt/obs-whip-live` 不存在的首次安装；
@@ -65,7 +65,7 @@ OBS
 
    ```sh
    set -eu
-   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
    sha256sum -c "$archive.sha256"
    sudo mkdir -m 0755 /opt/obs-whip-live
    sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
@@ -145,7 +145,7 @@ OBS
 
 ```sh
 set -eu
-archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
 cd "$(dirname "$archive")"
 sha256sum -c "$(basename "$archive").sha256"
 sudo mkdir -m 0700 /opt/obs-whip-live-backup
@@ -287,8 +287,8 @@ WHEP create 返回的 SDP 按启动时 `PUBLIC_HOST` 的已验证 A 记录精确
 - [DNS 配置](DNS-SETUP.txt)
 - [源码构建](BUILDING.md)
 
-简要更新内容见仓库的 [中文更新日志](https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.md)、
-[英文更新日志](https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.en.md) 和对应 GitHub Release 页面。
+简要更新内容见仓库的 [中文更新日志](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.md)、
+[英文更新日志](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.en.md) 和对应 GitHub Release 页面。
 详细更新与测试记录保留在本地；完整运行包不包含更新日志或详细报告。
 
 ## 源码、二进制与许可证

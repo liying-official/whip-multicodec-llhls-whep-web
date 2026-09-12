@@ -63,7 +63,7 @@ GNU coreutils (including `timeout` and `sha256sum`), standard shell utilities, a
 run the prebuilt package.
 
 1. Download the v1.35 runtime archive and its `.sha256` file from the same
-   [GitHub Release](https://github.com/liying-official/obs-whip-multicodec-llhls-web/releases).
+   [GitHub Release](https://github.com/liying-official/whip-multicodec-llhls-whep-web/releases).
    The actual release filename is retained below for checksum verification and compatibility
    with the current packaging tool. Its platform and build labels do not define distro support.
 2. Run the following from the download directory. This is a first-install procedure for an
@@ -72,7 +72,7 @@ run the prebuilt package.
 
    ```sh
    set -eu
-   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
    sha256sum -c "$archive.sha256"
    sudo mkdir -m 0755 /opt/obs-whip-live
    sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
@@ -169,7 +169,7 @@ ports, and interfaces before use.
 
 ```sh
 set -eu
-archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
 cd "$(dirname "$archive")"
 sha256sum -c "$(basename "$archive").sha256"
 sudo mkdir -m 0700 /opt/obs-whip-live-backup
@@ -325,8 +325,8 @@ Private, loopback, or link-local real IPv4 sources may additionally receive the 
 - [DNS setup](DNS-SETUP.txt)
 - [Building from source](BUILDING.md)
 
-Brief updates are available in the repository [English changelog](https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.en.md),
-[Chinese changelog](https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.md), and the corresponding GitHub Release.
+Brief updates are available in the repository [English changelog](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.en.md),
+[Chinese changelog](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.md), and the corresponding GitHub Release.
 Detailed change and test records remain local. Runtime archives exclude changelogs
 and detailed reports.
 

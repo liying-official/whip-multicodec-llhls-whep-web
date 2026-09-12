@@ -1,13 +1,12 @@
-# v1.35 update summary
+# v1.35 · fix10 update summary
 
 English | [简体中文](CHANGELOG.md)
 
-- Upgrade MediaMTX to v1.21.0 and HLS.js to v1.7.3; build all six Linux binaries with Go 1.27.1 while retaining AV1 compatibility patches.
-- Improve LL-HLS append/recovery handling, distinguish bandwidth/loss from RTT pressure, and use measured 8/6-second buffer readiness thresholds.
-- Strengthen public routing, source/session checks, TLS/security headers, and systemd install/stop boundaries; retain persistent publishing credentials.
-- Remove test-environment settings from release configuration and documentation. Packaging always emits an unconfigured template and excludes certificates, private keys, runtime data and detailed local records.
-- Synchronize Chinese/English deployment, ports, defaults and build guidance under v1.35; provide the fix9 runtime archive and SHA256.
+- Fix credential deletion after failed or unconfirmed stops; retain default stop, explicit preserve and deployment ownership checks.
+- Validate required metadata types before packaging reads, rejecting FIFOs/symlinks while preserving SHA regeneration and the strict managed-file list.
+- Replace a real public address remaining in tests with a documentation address; exclude deployment certificates/private keys, runtime data and detailed local records.
+- Add stop-authorization and packaging regressions. Player logic, weak-network policy, dependencies and all six binaries remain unchanged.
 
-Validation: security, weak-network recovery and installation regressions passed; both architecture builds, file checksums and reproducible packaging were verified.
+Validation: targeted regressions, Go/JS and installation-trust checks, manifests and reproducible packaging passed. Detailed Chinese/English records remain local.
 
-Known limits: some Chromium environments can still stop decoding AV1/WHEP. MediaMTX/Caddy binaries retain the GO-2026-5932 OpenPGP advisory; see [security notes](SECURITY.txt) for scope.
+Known limits: manual WHEP may rebuild its session shortly after switching; the trigger remains unconfirmed and this candidate does not change that player logic. See [security notes](SECURITY.txt) for dependency advisories. This publication is not a full production-suitability certification.

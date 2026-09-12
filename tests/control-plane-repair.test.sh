@@ -1218,4 +1218,5 @@ for operation in install-systemd stop uninstall; do
   assert_no_global_side_effect "not-found-active-$operation"
   echo "PASS: active process behind LoadState=not-found denied for $operation"
 done
+/bin/sh "$SOURCE_ROOT/tests/stop-clear-authorization.test.sh"
 echo "CONTROL_PLANE_REPAIR_TESTS=PASS"
