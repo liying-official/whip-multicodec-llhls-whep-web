@@ -1,0 +1,39 @@
+--- a/internal/protocols/webrtc/inbound_track.go
++++ b/internal/protocols/webrtc/inbound_track.go
+@@ -14,9 +14,12 @@
+ )
+ 
+ const (
+-	keyFrameInterval  = 2 * time.Second
+-	mimeTypeMultiopus = "audio/multiopus"
+-	mimeTypeL16       = "audio/L16"
++	// AV1 WHIP bursts can arrive more than 64 packets out of order. Keep
++	// SRTP anti-replay and the video reorderer on the same bounded window.
++	inboundRTPReorderWindow = 512
++	keyFrameInterval        = 2 * time.Second
++	mimeTypeMultiopus       = "audio/multiopus"
++	mimeTypeL16             = "audio/L16"
+ )
+ 
+ var incomingVideoCodecs = []webrtc.RTPCodecParameters{
+@@ -329,6 +332,9 @@
+ 			t.writeRTCP([]rtcp.Packet{p}) //nolint:errcheck
+ 		},
+ 	}
++	if t.track.Kind() == webrtc.RTPCodecTypeVideo {
++		t.rtpReceiver.BufferSize = inboundRTPReorderWindow
++	}
+ 	err := t.rtpReceiver.Initialize()
+ 	if err != nil {
+ 		panic(err)
+--- a/internal/protocols/webrtc/peer_connection.go
++++ b/internal/protocols/webrtc/peer_connection.go
+@@ -214,6 +214,8 @@
+ 	}
+ 
+ 	settingsEngine := webrtc.SettingEngine{}
++	// Keep replay protection enabled while admitting legitimate reordered video.
++	settingsEngine.SetSRTPReplayProtectionWindow(inboundRTPReorderWindow)
+ 
+ 	settingsEngine.SetIncludeLoopbackCandidate(true)
+ 

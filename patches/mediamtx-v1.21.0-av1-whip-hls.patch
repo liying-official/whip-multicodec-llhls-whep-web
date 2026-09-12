@@ -1,63 +1,74 @@
 diff --git a/internal/stream/unit_remuxer.go b/internal/stream/unit_remuxer.go
-index 9b90a7c..8ad7650 100644
+index 565f319..1f5b8c1 100644
 --- a/internal/stream/unit_remuxer.go
 +++ b/internal/stream/unit_remuxer.go
-@@ -4,6 +4,7 @@ import (
- 	"bytes"
- 
- 	"github.com/bluenviron/gortsplib/v5/pkg/format"
-+	mcav1 "github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
- 	mch264 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
- 	mch265 "github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
- 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4video"
-@@ -12,6 +13,172 @@ import (
- 
+@@ -16,39 +16,174 @@ import (
+ // payload is assumed to be non-nil and to be of the same type as the format.
  type unitRemuxer func(format.Format, unit.Payload) unit.Payload
  
+-func unitRemuxerAV1(_ format.Format, payload unit.Payload) unit.Payload {
+-	tu := payload.(unit.PayloadAV1)
 +func av1PayloadWithExactSize(obu []byte, offset int) ([]byte, bool) {
 +	if offset >= len(obu) {
 +		return nil, false
 +	}
-+
-+	var size mcav1.LEB128
+ 
+-	n := 0
++	var size av1.LEB128
 +	n, err := size.Unmarshal(obu[offset:])
 +	if err != nil {
 +		return nil, false
 +	}
-+
+ 
+-	for _, obu := range tu {
+-		typ := av1.OBUType((obu[0] >> 3) & 0b1111)
 +	payloadStart := offset + n
-+	if int(size) != (len(obu) - payloadStart) {
++	if int(size) != len(obu)-payloadStart {
 +		return nil, false
 +	}
-+
+ 
+-		if typ == av1.OBUTypeTemporalDelimiter {
+-			continue
+-		}
+-		n++
 +	return obu[payloadStart:], true
 +}
 +
 +func normalizeAV1OBU(obu []byte) ([]byte, bool) {
 +	if len(obu) == 0 {
 +		return nil, false
-+	}
-+
+ 	}
+ 
+-	if n == 0 {
+-		return nil
 +	header := obu[0]
 +	if (header & 0b10000001) != 0 {
 +		return nil, false
-+	}
-+
+ 	}
+ 
+-	filteredTU := make([][]byte, n)
+-	i := 0
 +	typ := (header >> 3) & 0b1111
 +	hasExtension := (header & 0b00000100) != 0
 +	hasSize := (header & 0b00000010) != 0
 +	offset := 1
-+
+ 
+-	for _, obu := range tu {
+-		typ := av1.OBUType((obu[0] >> 3) & 0b1111)
 +	if hasExtension {
 +		if len(obu) < 2 {
 +			return nil, false
 +		}
-+
+ 
+-		if typ == av1.OBUTypeTemporalDelimiter {
+-			continue
 +		extension := obu[1]
 +		if (extension & 0b111) != 0 {
 +			return nil, false
-+		}
-+
+ 		}
+ 
+-		filteredTU[i] = obu
+-		i++
 +		temporalID := extension >> 5
 +		spatialID := (extension >> 3) & 0b11
 +
@@ -122,8 +133,9 @@ index 9b90a7c..8ad7650 100644
 +	// uncompressed_header(): show_existing_frame, then frame_type.
 +	if (obu[1] & 0b10000000) != 0 {
 +		return false
-+	}
-+
+ 	}
+ 
+-	return unit.PayloadAV1(filteredTU)
 +	frameType := (obu[1] >> 5) & 0b11
 +	return frameType == 0 // KEY_FRAME
 +}
@@ -144,11 +156,15 @@ index 9b90a7c..8ad7650 100644
 +				continue
 +			}
 +
-+			typ := (normalized[0] >> 3) & 0b1111
-+			if typ == 1 { // OBU_SEQUENCE_HEADER
++			typ := av1.OBUType((normalized[0] >> 3) & 0b1111)
++			if typ == av1.OBUTypeTemporalDelimiter {
++				continue
++			}
++
++			if typ == av1.OBUTypeSequenceHeader {
 +				hasSequenceHeader = true
 +
-+				var parsed mcav1.SequenceHeader
++				var parsed av1.SequenceHeader
 +				if parsed.Unmarshal(normalized) == nil {
 +					sequenceHeader = append(sequenceHeader[:0], normalized...)
 +					reducedStillPictureHeader = parsed.ReducedStillPictureHeader
@@ -172,44 +188,42 @@ index 9b90a7c..8ad7650 100644
 +			filtered = append(withSequenceHeader, filtered...)
 +		}
 +
++		if len(filtered) == 0 {
++			return nil
++		}
++
 +		return unit.PayloadAV1(filtered)
 +	}
-+}
-+
-+func unitRemuxerAV1(forma format.Format, payload unit.Payload) unit.Payload {
-+	return newUnitRemuxerAV1()(forma, payload)
-+}
-+
- func unitRemuxerH265(forma format.Format, payload unit.Payload) unit.Payload {
- 	formatH265 := forma.(*format.H265)
- 	au := payload.(unit.PayloadH265)
-@@ -164,6 +331,9 @@ func unitRemuxerMPEG4Video(forma format.Format, payload unit.Payload) unit.Paylo
+ }
  
+ func unitRemuxerH265(forma format.Format, payload unit.Payload) unit.Payload {
+@@ -204,7 +339,7 @@ func unitRemuxerMPEG4Video(forma format.Format, payload unit.Payload) unit.Paylo
  func newUnitRemuxer(forma format.Format) unitRemuxer {
  	switch forma.(type) {
-+	case *format.AV1:
+ 	case *format.AV1:
+-		return unitRemuxerAV1
 +		return newUnitRemuxerAV1()
-+
+ 
  	case *format.H265:
  		return unitRemuxerH265
- 
-diff --git a/internal/stream/unit_remuxer_test.go b/internal/stream/unit_remuxer_test.go
+diff --git a/internal/stream/unit_remuxer_av1_test.go b/internal/stream/unit_remuxer_av1_test.go
 new file mode 100644
-index 0000000..34e6683
+index 0000000..5c712e1
 --- /dev/null
-+++ b/internal/stream/unit_remuxer_test.go
-@@ -0,0 +1,101 @@
++++ b/internal/stream/unit_remuxer_av1_test.go
+@@ -0,0 +1,116 @@
 +package stream
 +
 +import (
 +	"testing"
 +
 +	"github.com/bluenviron/gortsplib/v5/pkg/format"
-+	"github.com/bluenviron/mediamtx/internal/unit"
 +	"github.com/stretchr/testify/require"
++
++	"github.com/bluenviron/mediamtx/internal/unit"
 +)
 +
-+func TestUnitRemuxerAV1(t *testing.T) {
++func TestUnitRemuxerAV1Normalization(t *testing.T) {
 +	for _, ca := range []struct {
 +		name string
 +		in   unit.PayloadAV1
@@ -227,7 +241,7 @@ index 0000000..34e6683
 +		},
 +		{
 +			name: "sequence header with size",
-+			in:   unit.PayloadAV1{{0x0A, 0x02, 0x11, 0x22}},
++			in:   unit.PayloadAV1{{0x0a, 0x02, 0x11, 0x22}},
 +			out:  unit.PayloadAV1{{0x08, 0x11, 0x22}},
 +		},
 +		{
@@ -241,37 +255,51 @@ index 0000000..34e6683
 +			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
 +		},
 +		{
-+			name: "proper enhancement layer extension",
-+			in:   unit.PayloadAV1{{0x34, 0x20, 0x11, 0x22}},
-+			out:  unit.PayloadAV1{},
-+		},
-+		{
 +			name: "libdatachannel missing base header",
 +			in:   unit.PayloadAV1{{0x00, 0x02, 0x11, 0x22}},
 +			out:  unit.PayloadAV1{{0x30, 0x11, 0x22}},
 +		},
 +		{
-+			name: "invalid internal size",
-+			in:   unit.PayloadAV1{{0x32, 0x03, 0x11, 0x22}},
-+			out:  unit.PayloadAV1{},
++			name: "drop enhancement layer",
++			in:   unit.PayloadAV1{{0x34, 0x20, 0x11, 0x22}},
++			out:  nil,
 +		},
 +		{
-+			name: "empty and reserved",
-+			in:   unit.PayloadAV1{{}, {0x40, 0x11}},
-+			out:  unit.PayloadAV1{},
++			name: "drop invalid extension reserved bits",
++			in:   unit.PayloadAV1{{0x34, 0x01, 0x11, 0x22}},
++			out:  nil,
++		},
++		{
++			name: "drop truncated extension",
++			in:   unit.PayloadAV1{{0x34}},
++			out:  nil,
++		},
++		{
++			name: "drop invalid internal size",
++			in:   unit.PayloadAV1{{0x32, 0x03, 0x11, 0x22}},
++			out:  nil,
++		},
++		{
++			name: "drop empty reserved and temporal delimiter",
++			in:   unit.PayloadAV1{{}, {0x40, 0x11}, {0x10}},
++			out:  nil,
 +		},
 +	} {
 +		t.Run(ca.name, func(t *testing.T) {
-+			require.Equal(t, ca.out, unitRemuxerAV1(
-+				&format.AV1{PayloadTyp: 96},
-+				ca.in))
++			remux := newUnitRemuxerAV1()
++			got := remux(&format.AV1{}, ca.in)
++			if ca.out == nil {
++				require.Nil(t, got)
++				return
++			}
++			require.Equal(t, ca.out, got)
 +		})
 +	}
 +}
 +
 +func TestUnitRemuxerAV1SequenceHeaderRestore(t *testing.T) {
 +	remux := newUnitRemuxerAV1()
-+	forma := &format.AV1{PayloadTyp: 96}
++	forma := &format.AV1{}
 +	sequenceWithSize := []byte{
 +		0x0a, 0x0b, 0x00, 0x00, 0x00, 0x42, 0xab,
 +		0xbf, 0xc3, 0x71, 0xab, 0xe6, 0x01,

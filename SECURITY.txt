@@ -1,4 +1,5 @@
-公网 Web / 内网推流安全策略（R33）
+公网 Web / 内网推流安全策略（v1.35）
+Public web / private ingest security policy (v1.35)
 ==========================================
 
 安全边界
@@ -9,8 +10,8 @@
   UDP/TCP 8189  仅在公网 WHEP/WebRTC 播放时需要，承载 DTLS-SRTP 加密媒体
 
 服务器内 Caddy 固定监听 TCP/UDP 443；公网两种协议必须使用相同
-PUBLIC_HTTPS_PORT 映射到本机 443。Caddy 会在请求处理器中覆盖自动生成的本地
-443 Alt-Svc，通告配置的公网 HTTP/3 端口。
+PUBLIC_HTTPS_PORT 映射到本机 443。Caddy 会严格校验请求 authority 中的公网端口，
+并在请求处理器中覆盖自动生成的本地 443 Alt-Svc，通告配置的公网 HTTP/3 端口。
 
 内网发布面：
   TCP/8889  OBS WHIP 信令，仅绑定 WHIP_IP
@@ -19,27 +20,30 @@ PUBLIC_HTTPS_PORT 映射到本机 443。Caddy 会在请求处理器中覆盖自�
 内部面：
   127.0.0.1:8080  Web/HLS gateway
   127.0.0.1:8888  MediaMTX HLS
+  127.0.0.1:9998  MediaMTX metrics（同时要求 loopback 来源）
 
 TCP/8889 和 TCP/1935 不使用 0.0.0.0、* 或 IPv6 wildcard 监听。MediaMTX 的
 obs 发布账号还同时要求：
-  1. 手工启动生成的 128-bit 随机密码，或 systemd 模式复用的 root-only 128-bit 凭据；
+  1. 已有持久文件时手工/服务均复用 root-only 128-bit 凭据；仅无持久文件的手工启动生成临时随机密码；
   2. 来源地址属于启动时识别出的网卡局域网段或服务器 WHIP_IP/32；
   3. 只能 publish:live，不能发布其他路径。
 
 start.sh 每次启动都读取已启用网卡的 IPv4 和真实掩码，优先使用默认路由的
 RFC1918 地址，并把 ACL 强制生成为“接口局域网段 + WHIP_IP/32 本机地址”。
 例如接口 <LAN_IP>/<PREFIX_LENGTH> 会生成 <LAN_CIDR> 和 <LAN_IP>/32。
-旧版 INGEST_ALLOW_CIDRS 手工值仅为配置兼容而保留，会被忽略，不能扩大白名单。
+INGEST_ALLOW_CIDRS 手工值仅为配置兼容而保留，会被忽略，不能扩大白名单。
 找不到私网网卡、WHIP_IP 不是本机已启用地址、地址属于公网或无法读取掩码时，
 启动会失败关闭。
 
-这层 MediaMTX IP ACL 不替代主机防火墙；两者应同时启用。即使路由器误把
-8889/1935 转发到公网，公网源地址仍不能通过发布账号的来源检查。
+这层 MediaMTX IP ACL 不替代主机防火墙；两者应同时启用。来源检查依据服务器
+实际看到的地址。若 NAT/代理把外部连接改写为获准内网来源，ACL 无法还原原始来源；
+因此不要把 8889/1935 转发到公网，也不要用不可信代理绕过可信局域网边界。
 
 公网路由
 --------
 Caddy 只公开：
-  GET/HEAD  /、/index.html、/app.css、/app.js、/hls.min.js、/live、/live/*
+  GET/HEAD  /、/index.html、/app.css、/app.js、/hls.min.js、/hls-weak-network-policy.js、合法 /live/* HLS 资源（/live 与 /live/ 返回 404）
+  OPTIONS   /rtc/live/whep                  WHEP capability discovery
   POST      /rtc/live/whep                  WHEP create
   PATCH/DELETE /rtc/live/whep/*             WHEP session control
   POST      /rtc/live/whep/*                仅播放器 X-WHEP-Keepalive: 1 心跳
@@ -50,23 +54,42 @@ Caddy 只公开：
 公网路径返回 404。
 
 WHEP 防滥用：
+- 所有限流和活动会话配额对 IPv4 按 /32（单地址）计数，对 IPv6 按来源 /64 前缀聚合；
+  WHEP 会话控制所有权仍绑定创建者的完整、规范化 IP，不因同属 /64 而共享。
 - create POST 在进入任何 WHEP 限流/活动会话计数前，必须通过 MIME 解析并确认为 application/sdp；
   text/plain、application/x-www-form-urlencoded 等 HTML simple-request 类型返回 415，不消耗观众 IP 的 WHEP 配额。
-- 单 IP 创建采用滚动窗口：最多 10 次 POST/10 秒。
-- 同一 IP 最多 30 次创建/60 秒。
-- 同一 IP 最多 5 个活动 WHEP 会话；并发创建在发往 MediaMTX 前先预占槽位，避免竞态绕过。
+- 每个 IPv4 /32 或 IPv6 /64 的创建采用滚动窗口：最多 10 次 POST/10 秒。
+- 每个 IPv4 /32 或 IPv6 /64 最多 30 次创建/60 秒。
+- create、PATCH、DELETE 与播放器心跳合计另受每个 IPv4 /32 或 IPv6 /64 为 30 次/10 秒、120 次/60 秒的固定窗口限制；
+  因此已经建立会话的控制端点不能绕过 create 限流形成请求洪泛。
+- OPTIONS 能力发现仅返回固定的本地元数据，不转发后端，也不消耗上述限额。
+- 每个 IPv4 /32 或 IPv6 /64 最多 5 个活动 WHEP 会话；并发创建在发往 MediaMTX 前先预占槽位，避免竞态绕过。
 - 成功创建后按 Location 记录会话并绑定创建者 IP；其他 IP 的 PATCH/DELETE 不会转发。
 - 播放器每 60 秒发送一次无正文同源心跳，5 分钟无刷新会自动释放本地活动计数。
-- 超限返回 HTTP 429 + Retry-After；短时/分钟限流和活动会话上限使用不同安全错误分类。
+- 超限返回 HTTP 429 + Retry-After；操作同时触发短时与分钟窗口时返回两者中较长的剩余重置时间，
+  且短时/分钟限流和活动会话上限使用不同安全错误分类。
 - MediaMTX 错误正文不会透传给观众。已知“客户端不支持编码”被映射为
   X-WHEP-Error: unsupported-codec，以保留 WHEP -> LL-HLS 自动 fallback。
 - 其他 MediaMTX 4xx/5xx 只返回通用 WHEP 错误，原始后端细节不会进入观众页面。
 - HLS reverse proxy 的 MediaMTX 4xx/5xx 同样在 helper 层清洗：保留 HTTP 状态码，
   替换为固定 HLS 安全文案，并把后端错误响应头重建为最小安全白名单，设置 Cache-Control: no-store。
-  正常 2xx 与 3xx cookie redirect 不修改。
+  正常 2xx/3xx 的媒体正文与重定向语义保持不变，但响应 Cookie 只允许 MediaMTX 的
+  cookieCheck/hlsSession，并强制 Secure、HttpOnly（未指定时使用 SameSite=Lax）。
 - HLS 后端响应的 Server、Via、X-Powered-By 在 helper 层移除，Caddy 边缘仍再次移除 Server/Via。
+- 匿名播放器与 HLS 请求在 Caddy 和 helper 两层移除 Authorization/Proxy-Authorization；
+  bundled Caddy 使用 reverse_proxy 默认行为把客户端 X-Forwarded-For 替换为真实 peer，helper 只信任 loopback
+  Caddy 并取 X-Forwarded-For 末段，同时移除客户端 X-Real-IP 与无关 Cookie。
+- WHEP URL 不接受查询参数。对公网来源，create 响应的 ICE candidate 必须逐个精确匹配
+  start.sh 启动时从 PUBLIC_HOST 解析、校验并冻结的公网 IPv4 A 记录；私网、回环、
+  链路本地、CGNAT、文档保留段、其他特殊用途地址、IPv6、mDNS、畸形候选及其他
+  未批准地址全部删除。
+- 对判定为 RFC1918、回环或链路本地 IPv4 的内网来源，候选白名单可额外包含启动时
+  精确配置的 WHIP_IP，便于同网段观众直接连接；不因此放行任意私网候选。
+  来源仍由上述可信 loopback Caddy 与真实 peer 规则确定，公网客户端伪造
+  X-Forwarded-For 不能获得该例外。未配置本地候选时，该例外关闭。
+- 两种来源过滤后都必须存在获准候选；否则网关失败关闭且不提交会话。
 
-WHEP 的 UDP/TCP 8189 是随机 ICE/DTLS-SRTP 媒体通道，不是发布信令入口。
+WHEP 的 UDP/TCP 8189 是使用随机会话凭据的 ICE/DTLS-SRTP 媒体通道，不是发布信令入口。
 公网观众需要 WebRTC AV1 / VP9 回退时必须允许访问 8189；只使用 LL-HLS 时可以在公网
 防火墙关闭 8189。
 
@@ -75,13 +98,14 @@ TLS 与浏览器安全
 - TLS minimum/maximum 均为 TLS 1.3
 - HTTP/80 不监听
 - QUIC 0-RTT disabled
-- Host/SNI 必须严格一致；在可控 HTTP handler 内返回 421，以确保错误路径同样移除 Server/Via
+- Host authority 的域名/公网端口与 TLS SNI 必须严格一致；在可控 HTTP handler 内返回 421，
+  错误路径同样应用完整安全头并移除 Server/Via/Alt-Svc
 - HSTS: max-age=31536000
 - CSP: default-src 'none'；脚本、样式、连接和媒体只允许同源/必要 blob
 - frame-ancestors 'none'、X-Frame-Options DENY
 - nosniff、no-referrer、COOP same-origin、CORP same-origin
 - 禁用摄像头、麦克风、定位、支付、USB 等无关浏览器能力
-- 移除 Server/Via 响应头，包括 Host/SNI 不匹配的 421
+- 移除 Server/Via 响应头，包括 Host authority/SNI 不匹配的 421
 - request-body 上限触发的 413 等 error route 也带完整 HSTS、CSP、COOP、CORP、
   Permissions-Policy、X-Frame-Options、nosniff 和 no-referrer
 
@@ -92,10 +116,16 @@ TLS 与浏览器安全
 - /rtc/live/whep 仅执行受控 WHEP create/session/keepalive 处理，不是通用反向代理
 - 请求头上限 16 KiB
 - read-header timeout 5 秒
-- 有界的每来源 IP 频率表，防止攻击者地址耗尽内存
-- 只信任 loopback Caddy 传入的 X-Forwarded-For；非 loopback 同行无法伪造来源
+- Web/HLS 每个 IPv4 /32 或 IPv6 /64 固定窗口每分钟 6,000 次；超限 429 的
+  Retry-After 为剩余重置秒数（至少 1 秒）。Web/HLS 与 WHEP 表各最多 20,000 个来源键。
+- 有界的每来源频率表；IPv4 使用 /32、IPv6 聚合到 /64，防止临时 IPv6 地址轮换耗尽表项
+- bundled Caddy 使用 reverse_proxy 默认 X-Forwarded-For replacement；helper 只信任 loopback Caddy 并取末段，非 loopback 同行无法伪造来源
+- HLS/WHEP 后端 URL 只接受本机已分配的字面 IP 与明确端口；出站传输禁用环境代理，
+  并固定到校验时的 IP/端口。WHEP 不跟随后端重定向，避免 SSRF 与请求数据外送。
 - 静态 JS/CSS 全部本地保存，不依赖第三方 CDN
-- /hls.min.js 不再使用一年 immutable 固定文件名缓存，而是 `public, max-age=0, must-revalidate`；
+- 网页及 DevTools 不显示或记录上游错误正文；服务端只记录清洗、限长后的路径和状态，
+  防止后端细节泄漏及控制字符日志注入。
+- /hls.min.js 使用 `public, max-age=0, must-revalidate`；
   浏览器可通过 Last-Modified/304 复用缓存，但服务器替换依赖后会立即重新验证。
 
 本地安装信任边界
@@ -103,20 +133,34 @@ TLS 与浏览器安全
 - start.sh 固定 PATH=/usr/sbin:/usr/bin:/sbin:/bin，避免 root 启动时使用不可信 PATH 中的同名工具。
 - 项目目录及其全部父目录必须 uid=0 且 group/other 不可写；从普通用户可写目录直接 sudo 启动会 fail-close。
 - start.sh、stop/status/diagnose、supervisor、config.env、Caddy/MediaMTX 模板、bin/web/src/third_party 以及关键 web/src 文件在执行包内程序前做相同所有权/权限检查。
-- 当前架构 helper 和随包 MediaMTX 二进制在 chmod/执行前单独再次检查。
+- 当前架构 helper、MediaMTX 和 Caddy 二进制在执行前单独再次检查，并必须已经可执行；
+  服务直接执行固定的架构文件，不创建 bin/caddy 或 bin/mediamtx 运行副本。
 - 随包 web/hls.min.js、版本/许可证标记以及双架构 Caddy 都是必需的受管文件；
-  bin/caddy 运行副本若已存在，也必须由 root 所有且不可被 group/other 写。
+  systemd 模式把整个项目树设为只读，仅 logs/runtime 可以写入。
+- install-systemd.sh 在任何 unit 写入或 systemctl 操作前，验证自身及项目根目录不是
+  符号链接、项目到 `/` 的父目录链均由 root 拥有且不可被组/其他用户写入，并验证
+  unit 目录及既有 unit 的普通文件、所有权和权限。unit 先在同目录安全临时文件中
+  生成，经 `systemd-analyze verify` 后原子替换，并在替换后再次验证。
+- `install-systemd.sh --check-only` 执行上述项目树信任检查，要求 `config.env` 满足安装前置
+  条件，并要求强制 `SHA256SUMS` 信任文件存在、类型正确；它可在没有 systemd runtime
+  的最小容器中运行，不写 unit、不调用 systemctl，也不替代正式安装的完整内容漂移校验。
+  正式安装仍强制要求 systemd、systemctl、systemd-analyze、安全 unit 目标和严格 manifest 校验。
 
 配置与凭据
 ----------
-- config.env 使用严格 KEY=VALUE 数据解析器，不再用 shell 的点命令 source；
+- config.env 使用严格 KEY=VALUE 数据解析器，不用 shell 的点命令 source；
   因此 $(...)、反引号和命令分隔符不会作为 root 命令执行。
 - 未知配置项、重复配置项和格式错误会失败关闭。
-- 运行配置权限 0600；logs、runtime、certs 目录权限 0700。
+- 生成的运行配置权限 0600；logs、runtime、certs 目录权限 0700。
+  config.env 必须由 root 管理且 group/other 不可写；建议设为 0600。
+- TLS 私钥最终目标必须 uid=0 且不得有任何 group/other 权限；配置路径及符号链接
+  解析目标的全部父目录必须 uid=0 且 group/other 不可写。证书检查覆盖密钥匹配、
+  域名、有效期、ServerAuth 和系统根信任链，剩余不足 24 小时会拒绝启动。
 - 手工模式的明文推流码只显示在启动终端；MediaMTX 配置只保存 SHA-256 哈希。
 - systemd 服务模式把 key+hash 存在 root:root 0600 的 runtime/publish.credentials，
   不把明文写入 journal；show-credentials.sh 只允许 root 读取。
-- 手工 stop.sh 删除生成配置与持久凭据；重新启动会轮换推流码。systemd 管理器
+- stop.sh 默认保留持久凭据；只有显式执行 `stop.sh --clear-credentials` 才会删除，
+  下次启动时会生成新的推流码。systemd 管理器
   停止/故障重启时使用显式保留参数，避免无人值守恢复破坏 OBS 配置。
 - PID 操作核对 /proc/<PID>/cmdline，避免陈旧 PID 文件误杀其他进程。
 - 启动自检拒绝未替换模板占位符，并检查 8889/1935 没有 wildcard 监听。
@@ -129,26 +173,51 @@ WHIP/8889 的 HTTP Bearer Token 和 RTMP/1935 的账号密码均未使用 TLS。
 
 依赖供应链
 ----------
-- MediaMTX r8 修补二进制固定随包提供，不会在启动时被官方版本覆盖。
-- hls.js v1.6.16 固定随包提供；生成发布资产时已校验 npm SHA-512 integrity，
-  运行时不再访问 npm。
-- Caddy 固定随包提供，不再运行时下载“最新版本”；amd64/arm64 均由固定的
-  v2.11.4 源码提交、Go 1.26.5 和 third_party/Caddy-go.mod/Caddy-go.sum 构建。
-- helper 使用 Go 1.26.5 构建；双架构二进制的 govulncheck 结果均为 0。
-- Caddy 的可修复依赖告警均已升级。二进制扫描仍记录 x/crypto/openpgp 的
-  GO-2026-5932（上游无修复版本），但 `go list -deps ./cmd/caddy` 的实际可执行
-  依赖图不包含该包；固定模块清单、哈希与复现方法见 third_party/Caddy-BUILD.txt。
-- MediaMTX r8 二进制扫描也只剩同一个 GO-2026-5932。该公告把未维护的 openpgp
-  全版本/全符号统一标记为不安全且没有修复版本；本项目没有 OpenPGP 输入、密钥
-  或消息处理接口，直播配置不会调用该功能。此项不能通过升级 x/crypto 消除，
-  其余可检测告警为 0。
-- 最终包通过 SHA256SUMS 核对全部受管文件。
-
+- MediaMTX v1.21.0-r11 修补二进制固定随包提供，不会在启动时被官方版本覆盖。
+  官方 v1.21.0 源码标签固定到 2c6727904fbf233615de74a6c54a9b94dbf6025d；
+  gortmplib v1.0.2 固定到 fbafd129baf54d49a2e3243f620d738ed72ff82e。
+  本次官方 amd64/arm64 发布资产已用 GitHub CLI 2.100.0 按精确源码提交、标签、
+  release workflow 和 GitHub 托管执行器限制验证 attestation，两项均通过；验证的
+  Rekor 时间为 2026-09-06T05:28:38+08:00。身份与资产摘要见
+  third_party/MediaMTX-v1.21.0-UPSTREAM-ATTESTATION.txt。官方资产证明不直接
+  证明本项目自定义补丁二进制；六个自定义二进制另经新 GOCACHE 重建并逐字节匹配。
+- hls.js v1.7.3 固定随包提供，网页与 MediaMTX 内嵌页面使用同一份未修改发布资产；
+  npm 完整性、签名和 provenance 的本次记录见 third_party/HLSJS-VERSION.txt。
+  启动固定校验 SHA-256
+  a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e，且不访问 npm。
+- Caddy 保留 v2.11.4，双架构与 helper、MediaMTX 均使用 Go 1.27.1 构建；
+  Caddy 自定义版本为 v2.11.4-V1.35-go1.27.1-fix8v9（真实二进制标识，并非另一项目版本）。
+  Caddy 使用固定源码提交、
+  third_party/Caddy-go.mod/Caddy-go.sum 和 cel-go v0.30.0 API 兼容补丁。
+- MediaMTX 和 Caddy 固定使用 x/crypto v0.56.0 安全下限。
+  2026-09-12 使用 govulncheck v1.8.0、Go 1.27.1 完成源码入口
+  与六个二进制的扫描，数据库更新时间为 2026-09-10T14:48:42Z。
+- helper 的源码入口 ./src 与 amd64/arm64 二进制均无 finding。MediaMTX 的 . 与
+  Caddy 的 ./cmd/caddy 源码入口各报告一项 GO-2026-5932，仅涉及所需 x/crypto
+  模块；未报告受影响导入包或可调用符号。两组件的双架构二进制仍保留该公告的
+  OpenPGP 包/符号 finding，不宣称二进制“零告警”。该数据库中此未维护 API
+  没有修复版本；符号存在不等于确认存在运行入口调用链，源码入口扫描也不抹去
+  二进制保留告警。JSON 模式返回 0 只表示扫描完成，结论以 finding 内容为准。
+- AV1 兼容补丁继续校验结构长度与头位，且只在实际关键帧前恢复缓存序列头。
+  512 包 RTP 重排与 SRTP 重放窗口均有界，认证、重复包和过旧重放拒绝仍启用。
+  新增 RTX 协商不绕过发布鉴权、来源 ACL、公网候选过滤或 WHEP 会话所有权。
+- MediaMTX v1.21.0 的 Origin 协议/域名匹配修复、Vary: Origin 以及 API/metrics/pprof
+  默认空 Origin 列表保留；CORS 不是鉴权，不能替代本文件规定的监听、路由和账号边界。
+- helper 下载子命令只允许无凭据 HTTPS，重定向重新校验且禁止降级；每次重新执行
+  完整性验证，使用不可预测的同目录临时文件、精确解包长度和原子替换，并拒绝把
+  符号链接/非普通文件当作输出目标。v1.35 正常启动不执行网络下载。
+- 打包器在归档内生成未配置模板，不复制源目录 config.env 的部署域名、网卡地址
+  或端口映射；源目录配置保持原样。证书、私钥和 runtime 数据不进入发行包。
+- 最终包通过 SHA256SUMS 核对全部受管文件。该文件也覆盖文档；文档修改后必须
+  配套更新清单。正式安装按独立的 tools/release-managed-files.txt 校验条目集合、
+  顺序和内容，只有 config.env 的内容允许部署时更改。配置前可用 sha256sum -c
+  SHA256SUMS 校验原始包；更改 config.env 后，该命令会相应报告该文件摘要不符。
 
 systemd 进程沙箱
 ---------------
 - 可选 unit 使用 NoNewPrivileges、PrivateTmp、PrivateDevices、ProtectSystem=strict、
-  ProtectHome=read-only、capability bounding 和受限可写目录。
+  ProtectHome=true、ProtectProc=invisible、ProcSubset=pid、RestrictNamespaces、
+  MemoryDenyWriteExecute、ProtectKernelLogs/Clock/Hostname、capability bounding 和受限可写目录。
 - RestrictAddressFamilies 包含 AF_NETLINK，供 WHIP_IP 留空时读取默认路由和网卡；
   对外监听仍仅允许 AF_INET/AF_INET6，UNIX 本地通信使用 AF_UNIX。
 - 安装器只接受 /opt 或 /usr/local 下不含特殊字符的 root 管理路径。
@@ -156,5 +225,234 @@ systemd 进程沙箱
 
 安全更新说明
 ------------
-当前版本的安全更新与验证摘要统一写在对应的 GitHub Release 介绍页面。运行包
+当前版本的安全更新与验证摘要见仓库中英文精简更新日志及对应 GitHub Release 页面。运行包
 不附带历史更新日志、调试报告或测试环境记录；当前安全要求以本文件为准。
+
+
+English
+-------
+
+Security boundaries
+-------------------
+Public viewing uses TCP/PUBLIC_HTTPS_PORT for HTTP/1.1 and HTTP/2 over TLS 1.3,
+and UDP/PUBLIC_HTTPS_PORT for HTTP/3. Caddy listens on local TCP/UDP 443; both
+public protocols must map the same configured port to local 443. Authority
+checks and Alt-Svc use the public port. Public WHEP media additionally needs
+UDP/TCP 8189 for ICE and encrypted DTLS-SRTP. This is a fixed media port with
+random session credentials, not a publishing signalling endpoint. It can be
+closed at the public firewall when only LL-HLS playback is required.
+
+WHIP signalling uses TCP/8889 and RTMP ingest uses TCP/1935, both bound only to
+WHIP_IP. Internal listeners are 127.0.0.1:8080 (gateway), 127.0.0.1:8888 (HLS),
+and 127.0.0.1:9998 (metrics, also restricted to loopback source addresses).
+Neither ingest listener uses an IPv4 or IPv6 wildcard. Publishing as obs
+requires a 128-bit random credential, an address in the detected interface
+subnet or exact WHIP_IP/32, and publish permission for live only.
+
+Each startup reads active IPv4 interfaces and their real masks, preferring the
+default-route RFC1918 address. A missing private interface, non-local WHIP_IP,
+public ingest address or unreadable mask causes startup to fail closed.
+INGEST_ALLOW_CIDRS is a compatibility field; manually supplied values are
+ignored and cannot expand the detected ACL. Both manual and service modes
+reuse existing root-only persistent credentials; a fresh manual startup uses
+temporary credentials without writing them to disk.
+
+The source ACL complements the host firewall. It acts on the source address
+the server actually sees: NAT or a proxy that rewrites an external client to
+an allowed LAN address can hide the original source. Do not forward 8889/1935
+to the Internet or use an untrusted proxy to cross this boundary. WHIP HTTP
+Bearer tokens and RTMP credentials are plaintext on the trusted LAN; the ACL
+and firewall do not protect against sniffing within that LAN.
+
+Public routes and abuse controls
+--------------------------------
+Caddy exposes GET/HEAD only for /, /index.html, /app.css, /app.js, /hls.min.js,
+/hls-weak-network-policy.js and allowed /live/* HLS resources. /live, /live/,
+the embedded HLS player library and its map, and /live/whip or /live/whep
+signalling paths are blocked. WHEP uses:
+  OPTIONS /rtc/live/whep       local capability discovery
+  POST    /rtc/live/whep       session creation
+  PATCH/DELETE /rtc/live/whep/*  session control
+  POST /rtc/live/whep/*        empty heartbeat with X-WHEP-Keepalive: 1 only
+
+The /rtc prefix cannot reach publishing endpoints or act as a general proxy.
+Caddy strips client Authorization and Cookie before forwarding WHEP to the
+loopback gateway. WHEP request bodies are limited to 256 KiB; unsupported
+methods return 405 and other public routes return 404.
+
+- Rate and active-session quotas use individual IPv4 /32 addresses and IPv6
+  /64 prefixes. Session ownership still uses the creator's complete normalized
+  IP; sharing a /64 does not grant session-control access.
+- Create POST must pass application/sdp MIME validation before consuming any
+  WHEP rate or active-session quota. Simple HTML form types return 415.
+- Creation uses rolling limits of 10 requests/10 seconds and 30/60 seconds.
+- Create, PATCH, DELETE and heartbeat operations additionally share fixed-window
+  limits of 30/10 seconds and 120/60 seconds.
+- At most five active sessions are allowed per source group. Creation reserves
+  a slot before contacting the backend, preventing concurrent quota bypass.
+- OPTIONS returns local capability metadata without contacting the backend or
+  consuming creation/operation quotas.
+- Successful creation records Location and owner IP. Another IP cannot forward
+  PATCH/DELETE for that session. The player sends an empty same-origin heartbeat
+  every 60 seconds; five minutes without refresh expires local active counts.
+- Excess requests return 429 with Retry-After. When both operation windows are
+  exceeded, the longer remaining reset time is returned. Active-session and
+  rate-limit failures use distinct safe error classes.
+- Upstream WHEP 4xx/5xx bodies are replaced with generic text. A recognized
+  unsupported codec maps to X-WHEP-Error: unsupported-codec for controlled
+  WHEP-to-LL-HLS fallback. Original backend details do not reach the page.
+- HLS 4xx/5xx retain the HTTP status but replace body and response headers with
+  safe fixed values, including Cache-Control: no-store. Normal 2xx/3xx media
+  and redirect semantics are retained. Only cookieCheck/hlsSession cookies
+  survive, with Secure and HttpOnly; an unspecified SameSite becomes Lax.
+- The helper strips Server, Via and X-Powered-By from HLS backend responses;
+  Caddy also strips Server/Via. Anonymous Web/HLS requests lose Authorization,
+  Proxy-Authorization, X-Real-IP and unrelated cookies across these layers.
+  Caddy replaces incoming X-Forwarded-For with the actual peer. The helper
+  trusts that header only from loopback Caddy and uses its final address.
+- WHEP URLs reject query parameters. For public requesters, every returned
+  host ICE candidate must exactly match the validated public IPv4 A-record
+  snapshot frozen from PUBLIC_HOST at startup. Private, loopback, link-local,
+  CGNAT, documentation/special-use, IPv6, mDNS, malformed and other unapproved
+  candidates are removed. Unsafe related-address extensions are rejected.
+- A requester identified as RFC1918, loopback or link-local IPv4 may additionally
+  receive the exact configured WHIP_IP. This permits LAN playback, not arbitrary
+  private candidates. Spoofed X-Forwarded-For from a public requester cannot
+  obtain the exception; without a configured local candidate it is disabled.
+  Both source classes fail closed when no approved candidate remains.
+
+TLS and browser protections
+---------------------------
+Only TLS 1.3 is enabled; HTTP/80 and QUIC 0-RTT are disabled. Request authority
+(domain and public port) and TLS SNI are strictly checked. Mismatches return
+421 within the protected handler and remove Server, Via and Alt-Svc. Normal
+and controlled error responses, including request-body 413 errors, carry:
+- HSTS max-age=31536000; nosniff; no-referrer; X-Frame-Options DENY.
+- CSP default-src 'none', frame-ancestors 'none', same-origin scripts/styles/
+  connections and only the necessary blob/data allowances for media/workers/
+  images. No camera, microphone, location, payment or USB access is granted.
+- COOP same-origin, CORP same-origin and the restrictive Permissions-Policy.
+
+Gateway and local installation trust
+------------------------------------
+The gateway listens only on 127.0.0.1:8080. Web/HLS accept GET/HEAD without a
+request body, including rejecting chunked or unknown-length bodies. Request
+headers are limited to 16 KiB and the read-header timeout is five seconds.
+Web/HLS use a fixed window of 6,000 requests/minute per IPv4 /32 or IPv6 /64,
+with Retry-After equal to the remaining reset time, at least one second. Both
+the Web/HLS and WHEP source tables are bounded to 20,000 keys.
+
+HLS/WHEP backend URLs require a literal IP assigned to this host and an explicit
+port. Outbound connections are pinned to the validated IP/port and ignore
+environment HTTP proxies. WHEP redirects are not followed. JavaScript and CSS
+are bundled locally. Backend error bodies are not displayed or logged in the
+page/DevTools; server logs contain sanitized, bounded paths and statuses.
+/hls.min.js uses public, max-age=0, must-revalidate, permitting Last-Modified/304
+reuse while revalidating a replaced asset.
+
+start.sh fixes PATH to /usr/sbin:/usr/bin:/sbin:/bin. The project and every
+parent directory must be owned by uid 0 and not writable by group/others.
+Entry/control scripts, configuration, templates, bin/web/src/third_party paths
+and required assets undergo ownership/type/mode checks before bundled programs
+execute. Architecture-specific helper, MediaMTX and Caddy files are rechecked
+and must already be executable; the service uses those exact files directly.
+The bundled HLS asset, version/license markers and both Caddy architectures
+are required managed files.
+
+Before unit writes or systemctl actions, install-systemd.sh rejects symlinked
+installer/root paths, validates the root-owned non-writable parent chain and
+unit directory/target, generates a safe same-directory temporary unit, runs
+systemd-analyze verify, atomically replaces the unit and checks it again.
+--check-only checks the project trust boundary, configuration prerequisites and
+the required regular SHA256SUMS trust file. It writes no unit and calls no
+systemctl; it can run without systemd runtime, but does not replace the formal
+installation's full content-drift verification. Formal installation requires
+systemd tools, a safe unit target and strict manifest validation.
+
+The packager emits an unconfigured template instead of copying source config.env
+deployment hostnames, interface addresses or port mappings. Source configuration
+is unchanged. Certificates, private keys and runtime data are excluded.
+
+SHA256SUMS covers every managed file, including documentation. Update it with
+any documentation change. Formal installation checks the independent canonical
+file list, order and hashes; only config.env content is mutable for deployment.
+Run sha256sum -c SHA256SUMS before configuring a fresh package. After editing
+config.env, that generic command will report its expected content mismatch.
+
+Configuration, credentials and process lifecycle
+------------------------------------------------
+config.env is parsed as strict KEY=VALUE data, never sourced as shell code.
+Command substitutions, backticks and separators cannot execute as root. Unknown
+or duplicate keys and malformed lines fail closed. config.env must be root-owned
+and not writable by group/others; mode 0600 is recommended. Generated runtime
+configuration is 0600; logs, runtime and certs directories are 0700.
+
+TLS private-key targets must be owned by uid 0 with no group/other permissions.
+Both configured and resolved symlink-parent chains must be root-owned and not
+group/other writable. Checks include key matching, hostname, validity,
+ServerAuth and the system trust chain; less than 24 hours remaining is rejected.
+
+Manual startup displays the credential in its terminal; MediaMTX configuration
+contains only its SHA-256 hash. Service mode stores key+hash in root:root 0600
+runtime/publish.credentials and does not write the plaintext to the journal.
+Only root may use show-credentials.sh. stop.sh preserves credentials by default;
+--clear-credentials explicitly invalidates them and the next startup generates
+a new key. Service-manager stop/failure recovery explicitly preserves them.
+PID handling validates /proc/<PID>/cmdline. Startup rejects unresolved template
+placeholders and wildcard ingest listeners.
+
+The optional root-running systemd service restricts writes to logs/runtime and
+uses NoNewPrivileges, PrivateTmp, PrivateDevices, ProtectSystem=strict,
+ProtectHome, ProtectProc, ProcSubset, RestrictNamespaces, MemoryDenyWriteExecute,
+kernel log/clock/hostname protections and bounded capabilities. AF_NETLINK is
+allowed for interface/default-route detection, AF_INET/AF_INET6 for networking
+and AF_UNIX for local communication. The installer accepts safe root-managed
+paths only beneath /opt or /usr/local. These are process sandbox protections,
+not a complete multi-user privilege separation.
+
+Supply chain and current validation limits
+------------------------------------------
+- MediaMTX v1.21.0-r11 is bundled and never replaced by an official download at
+  startup. The upstream commit is 2c6727904fbf233615de74a6c54a9b94dbf6025d;
+  gortmplib v1.0.2 is fixed at fbafd129baf54d49a2e3243f620d738ed72ff82e.
+  GitHub CLI 2.100.0 verified both official Linux architectures against the
+  exact commit/ref/release workflow and GitHub-hosted-runner restriction.
+  Verified Rekor time: 2026-09-05T21:28:38Z. See the upstream attestation record.
+  That attestation does not attest this project's patched binaries; all six
+  custom binaries separately matched clean-cache rebuilds byte for byte.
+- hls.js v1.7.3 is the same unmodified npm asset in the public player and the
+  MediaMTX embedded player. Its integrity/signature/provenance record is in
+  third_party/HLSJS-VERSION.txt. Startup checks SHA-256
+  a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e
+  without contacting npm.
+- Caddy v2.11.4, helper and MediaMTX are built with Go 1.27.1 for both
+  architectures. Caddy's actual immutable version string is
+  v2.11.4-V1.35-go1.27.1-fix8v9; it is a binary identifier, not another project
+  release number. Its pinned commit/module graph and cel-go v0.30.0 API patch
+  are recorded in third_party. Both MediaMTX and Caddy retain x/crypto v0.56.0.
+- Scans dated 2026-09-12 used govulncheck v1.8.0, Go 1.27.1 and a vulnerability
+  database updated at 2026-09-10T14:48:42Z. Helper source and both binaries had
+  no findings. MediaMTX/Caddy source entries each reported module-only
+  GO-2026-5932, without affected imported-package or callable-symbol findings.
+  Both architectures of those binaries retain this OpenPGP package/symbol
+  advisory. The database lists no fixed version for this unmaintained API.
+  Symbol presence is not proof of a reachable runtime call; source scans do
+  not erase binary findings. JSON exit code zero means completion, not zero
+  findings. Do not describe the binaries as having no alerts.
+- AV1 patches retain structural/header validation and restore cached sequence
+  headers only before actual keyframes. RTP reordering and SRTP replay windows
+  are bounded to 512 packets; authentication, duplicate rejection and rejection
+  of excessively old packets remain enabled. RTX negotiation does not bypass
+  publishing credentials, source ACLs, candidate filtering or session ownership.
+- MediaMTX v1.21.0 Origin matching and Vary: Origin protections remain, as do
+  empty default API/metrics/pprof Origin lists. CORS is not authentication and
+  does not replace listener, routing or account boundaries.
+- Helper download subcommands accept credential-free HTTPS only, revalidate
+  redirects and prohibit downgrade. Each invocation verifies integrity, uses
+  unpredictable same-directory temporary files, exact extraction lengths and
+  atomic replacement, and rejects symlink/non-regular targets. Normal v1.35
+  startup performs no downloads.
+
+Current security update and validation summaries appear in the bilingual brief
+repository changelogs and the corresponding GitHub Release. The runtime package excludes historical changelogs and debug
+reports; this document describes the current security requirements.

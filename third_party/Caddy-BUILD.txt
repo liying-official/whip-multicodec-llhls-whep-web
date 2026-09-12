@@ -1,8 +1,14 @@
-Caddy R33 reproducible build record
+v1.35 Caddy 可重现构建记录 / Caddy reproducible build record
 ===================================
 
-Runtime version:
-  v2.11.4-r33-go1.26.5
+Project version: v1.35. Commands, paths and verification values below are shared
+by both languages. Dated validation records are preserved from that verification;
+this documentation review does not claim a new runtime test or attestation run.
+The exact runtime/build version is an existing binary identity, not an alternate
+project release name; preserve it when reproducing the bundled binary.
+
+Runtime version (exact existing binary identifier):
+  v2.11.4-V1.35-go1.27.1-fix8v9
 
 Upstream source:
   https://github.com/caddyserver/caddy
@@ -10,7 +16,7 @@ Upstream source:
   commit: e2eee6a7fce366321294c9c2a79f3146891dcbdf
 
 Toolchain:
-  Go 1.26.5
+  Go 1.27.1
   CGO_ENABLED=0
   GOOS=linux
   GOARCH=amd64 or arm64
@@ -18,42 +24,115 @@ Toolchain:
 Exact module graph:
   Copy Caddy-go.mod to the upstream source root as go.mod.
   Copy Caddy-go.sum to the upstream source root as go.sum.
+  Apply Caddy-cel-go-0.30.patch to adapt Caddy v2.11.4 to the cel-go v0.30
+  InterpretableV2 API. This is the same compatibility update used by newer
+  upstream Caddy code.
 
 Security dependency updates relative to upstream v2.11.4 include:
   github.com/go-chi/chi/v5 v5.3.0
+  github.com/google/cel-go v0.30.0
   github.com/klauspost/compress v1.18.7
   go.opentelemetry.io/otel v1.44.0
   go.opentelemetry.io/otel/metric v1.44.0
   go.opentelemetry.io/otel/trace v1.44.0
-  golang.org/x/crypto v0.54.0
-  golang.org/x/net v0.56.0
-  golang.org/x/text v0.40.0
+  golang.org/x/crypto v0.56.0
+  golang.org/x/net v0.57.0
+  golang.org/x/text v0.41.0
   google.golang.org/grpc v1.82.1
 
 Build command (replace ARCH with amd64 or arm64):
-  GOTOOLCHAIN=go1.26.5 CGO_ENABLED=0 GOOS=linux GOARCH=ARCH \
-    go build -trimpath -buildvcs=false \
-    -ldflags='-s -w -buildid= -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4-r33-go1.26.5' \
+  GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=ARCH \
+    go build -p 4 -mod=readonly -trimpath -buildvcs=false \
+    -ldflags='-s -w -buildid= -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4-V1.35-go1.27.1-fix8v9' \
     -o caddy_linux_ARCH ./cmd/caddy
 
 SHA-256:
-  amd64  2d9683d8520210cc5b85a4af1f7b23295c812a7868c98a942601dbe1e7e48760
-  arm64  3b6c50d7bb13a46a2973e0eca5f029bd01d18670dc522edc68e59bb5f45c3159
+  amd64  9733bf44efa76a9c3cccd705e4f6cd4c91a760a11c0e3f5b46efc91ae6a762da
+  arm64  c8c4fc95aa9ccfed022059b7613b170f1614aa1da3b675762b8ec2ae443d91be
 
-Reproducibility:
-  A second amd64 build from the same source, module files, toolchain and flags
-  produced the identical SHA-256 shown above (byte-for-byte cmp exit 0).
+Reproducibility (2026-09-12):
+  Both amd64 and arm64 were rebuilt from the same source, module files,
+  generated assets, Go 1.27.1 toolchain and flags with a fresh GOCACHE.
+  Each rebuilt binary matched the bundled bytes (cmp exit 0) and SHA-256 above.
+  The recorded builds used -p 4, CGO_ENABLED=0, -mod=readonly, -trimpath,
+  -buildvcs=false and -ldflags='-s -w -buildid=' plus the CustomVersion value.
 
-Validation:
-  go test ./cmd/caddy ./caddyconfig/caddyfile ./modules/caddyhttp
-  passed with Go 1.26.5.
+Validation (2026-09-12):
+  go vet ./... passed. The complete normal suite (go test -p 1 -timeout 180s
+  -count=1 ./...) passed 1,070 test/subtest runs. The focused race suite for
+  ./cmd/caddy ./caddyconfig/caddyfile ./modules/caddyhttp passed 159 runs.
+  No executed test case was skipped; skip events were packages without tests.
+  The initial full-suite run inherited HTTP proxy settings and failed local
+  PROXY-protocol integration tests. Those tests and the complete suite passed
+  after proxy variables were unset; no assertions or test exclusions changed.
 
-Vulnerability audit:
-  All advisories with available fixed dependency versions were removed.
-  govulncheck -mode=binary reports only GO-2026-5932 for
-  golang.org/x/crypto/openpgp. The advisory has no fixed version, and
-  `go list -deps ./cmd/caddy` does not contain the openpgp package, so the
-  executable command dependency graph has no reachable import of that package.
+  The actual bundled Caddy plus compiled helper passed 115/115 security boundary
+  checks against a controlled media backend. Coverage includes HTTP/1.1, HTTP/2,
+  HTTP/3, authority/SNI/port enforcement, TLS 1.3, route restrictions, security
+  headers, source/credential stripping and WHEP limits/ownership. This fixture
+  does not claim real codec, ingest or live weak-network playback coverage.
+  Runtime acceptance and its limits are recorded in the accompanying upgrade
+  report. Native arm64 execution is separate from the verified cross-build.
+
+Vulnerability audit (2026-09-12):
+  govulncheck v1.8.0 used Go 1.27.1 and the vulnerability database updated at
+  2026-09-10T14:48:42Z. The ./cmd/caddy source-entry scan reported one module-only
+  finding, GO-2026-5932 in x/crypto v0.56.0, with no affected imported-package
+  or callable-symbol finding at that executable entry.
+
+  Both binary scans retain OpenPGP module/package/symbol findings for that same
+  GO-2026-5932 advisory. The database describes an unmaintained API with known
+  security issues and no fixed version. These are not zero-warning binaries;
+  the source-entry result does not erase retained binary findings. A symbol
+  match alone does not establish a runtime call path. JSON-mode exit 0 means
+  scan completion, not the absence of findings.
 
 License:
   See Caddy-LICENSE.txt.
+
+中文说明（与上文共用命令、依赖清单和 SHA-256）
+================================================
+
+本项目版本为 v1.35。实际 Caddy 二进制版本字符串是
+v2.11.4-V1.35-go1.27.1-fix8v9；它是既有构建标识，重现当前二进制时必须原样保留，
+不作为项目文档的版本名称。
+
+源码与工具链：
+  上游仓库、v2.11.4 标签和固定提交见上文。使用 Go 1.27.1，禁用 CGO，
+  目标为 Linux amd64 或 arm64。把 Caddy-go.mod/go.sum 复制为上游根目录的
+  go.mod/go.sum，再应用 Caddy-cel-go-0.30.patch，以适配 cel-go v0.30 的
+  InterpretableV2 API；该兼容方式与较新上游 Caddy 代码一致。
+  上方完整列出的依赖版本是相对上游 v2.11.4 的安全依赖更新，须按随包依赖图保留。
+  构建命令中的 ARCH 替换为 amd64 或 arm64；其余参数和 CustomVersion 保持原样。
+
+可重现性记录（2026-09-12）：
+  两个架构均使用相同源码、模块文件、生成资源、Go 1.27.1 和参数，以全新 GOCACHE
+  重建。每个重建产物均与随包二进制逐字节一致（cmp 退出 0），SHA-256 见上文。
+  参数包括 -p 4、CGO_ENABLED=0、-mod=readonly、-trimpath、-buildvcs=false、
+  -ldflags='-s -w -buildid=' 以及准确的 CustomVersion 值。
+
+验证记录（2026-09-12）：
+  go vet ./... 通过；完整普通测试 go test -p 1 -timeout 180s -count=1 ./...
+  通过 1,070 个测试/子测试；./cmd/caddy、./caddyconfig/caddyfile、
+  ./modules/caddyhttp 的定向 race 测试通过 159 个。没有跳过已执行测试用例，
+  skip 事件是没有测试文件的包。
+  初次完整测试继承了 HTTP 代理，导致本地 PROXY 协议集成测试失败；清除代理后，
+  这些用例和完整套件均通过，未修改断言或排除用例。
+
+  实际随包 Caddy 和编译后的 helper 在受控媒体后端上通过 115/115 安全边界检查，
+  包括 HTTP/1.1、HTTP/2、HTTP/3、authority/SNI/端口约束、TLS 1.3、路由限制、
+  安全响应头、来源/凭据剥离和 WHEP 限额/会话归属。该夹具不覆盖真实编解码、
+  推流或实时弱网播放。运行时验收和限制见随附升级报告；arm64 原生执行需要
+  单独验证，不能由交叉编译结果推断。本次文档整理不代表重新执行上述运行测试。
+
+漏洞审计记录（2026-09-12）：
+  govulncheck v1.8.0 使用 Go 1.27.1 和更新至 2026-09-10T14:48:42Z 的数据库。
+  ./cmd/caddy 源码入口报告一个模块级发现：x/crypto v0.56.0 的 GO-2026-5932；
+  该入口没有受影响导入包或可调用符号发现。
+  两个二进制扫描仍有同一公告的 OpenPGP 模块/包/符号发现。数据库描述的是一个
+  停止维护、存在已知安全问题且没有修复版本的 API，因此不能称为零警告二进制。
+  源码入口扫描不会抹去二进制发现，单独匹配符号也不能证明存在运行时调用路径。
+  JSON 模式退出 0 仅表示扫描完成，不表示没有漏洞发现。
+
+许可证：
+  见 Caddy-LICENSE.txt；法律文本保持原样。

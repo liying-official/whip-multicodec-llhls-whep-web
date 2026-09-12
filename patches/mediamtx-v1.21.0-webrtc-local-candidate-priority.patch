@@ -1,0 +1,218 @@
+diff --git a/internal/protocols/webrtc/peer_connection.go b/internal/protocols/webrtc/peer_connection.go
+index 21c372e..9f480ea 100644
+--- a/internal/protocols/webrtc/peer_connection.go
++++ b/internal/protocols/webrtc/peer_connection.go
+@@ -517,6 +517,29 @@ func (co *PeerConnection) removeUnwantedCandidates(firstMedia *sdp.MediaDescript
+ 	return nil
+ }
+ 
++// hostCandidatePriorities returns the ICE priorities assigned to the host
++// candidates of a given address.
++//
++// Addresses inside the local network are preferred over public ones. The
++// public address of a server that is reachable both locally and through a NAT
++// gateway is otherwise an equally ranked choice, and clients that nominate it
++// force their own media through that gateway - which is a slow path and, on
++// consumer gateways, a lossy one.
++func hostCandidatePriorities(ip string) (uint32, uint32) {
++	const (
++		localUDPPriority  = 2130706431
++		localTCPPriority  = 1671430143
++		remotePriorityGap = 1 << 16
++	)
++
++	addr := net.ParseIP(ip)
++	if addr != nil && (addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast()) {
++		return localUDPPriority, localTCPPriority
++	}
++
++	return localUDPPriority - remotePriorityGap, localTCPPriority - remotePriorityGap
++}
++
+ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescription) error {
+ 	i := 0
+ 	for _, attr := range firstMedia.Attributes {
+@@ -526,6 +549,20 @@ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescripti
+ 		i++
+ 	}
+ 
++	udpPort := ""
++	if co.ICEUDPMux != nil {
++		udpPort = strconv.FormatInt(int64(co.ICEUDPMux.GetListenAddresses()[0].(*net.UDPAddr).Port), 10)
++	}
++
++	tcpPort := ""
++	if co.ICETCPMux != nil {
++		tcpPort = strconv.FormatInt(int64(co.ICETCPMux.Ln.Addr().(*net.TCPAddr).Port), 10)
++	}
++
++	// Candidates are collected first and inserted in a single step, so that
++	// their order inside the SDP matches the order of AdditionalHosts.
++	var added []sdp.Attribute
++
+ 	for _, host := range co.AdditionalHosts {
+ 		var ips []string
+ 		if net.ParseIP(host) != nil {
+@@ -542,57 +579,61 @@ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescripti
+ 			}
+ 
+ 			ips = make([]string, len(tmp))
+-			for i, e := range tmp {
+-				ips[i] = e.String()
++			for j, e := range tmp {
++				ips[j] = e.String()
+ 			}
+ 		}
+ 
+ 		for _, ip := range ips {
+-			newAttrs := append([]sdp.Attribute(nil), firstMedia.Attributes[:i]...)
+-
+-			if co.ICEUDPMux != nil {
+-				port := strconv.FormatInt(int64(co.ICEUDPMux.GetListenAddresses()[0].(*net.UDPAddr).Port), 10)
++			udpPriority, tcpPriority := hostCandidatePriorities(ip)
+ 
++			if udpPort != "" {
+ 				tmp, err := randUint32()
+ 				if err != nil {
+ 					return err
+ 				}
+ 				id := strconv.FormatInt(int64(tmp), 10)
++				priority := strconv.FormatUint(uint64(udpPriority), 10)
+ 
+-				newAttrs = append(newAttrs, sdp.Attribute{
++				added = append(added, sdp.Attribute{
+ 					Key:   "candidate",
+-					Value: id + " 1 udp 2130706431 " + ip + " " + port + " typ host",
++					Value: id + " 1 udp " + priority + " " + ip + " " + udpPort + " typ host",
+ 				})
+-				newAttrs = append(newAttrs, sdp.Attribute{
++				added = append(added, sdp.Attribute{
+ 					Key:   "candidate",
+-					Value: id + " 2 udp 2130706431 " + ip + " " + port + " typ host",
++					Value: id + " 2 udp " + priority + " " + ip + " " + udpPort + " typ host",
+ 				})
+ 			}
+ 
+-			if co.ICETCPMux != nil {
+-				port := strconv.FormatInt(int64(co.ICETCPMux.Ln.Addr().(*net.TCPAddr).Port), 10)
+-
++			if tcpPort != "" {
+ 				tmp, err := randUint32()
+ 				if err != nil {
+ 					return err
+ 				}
+ 				id := strconv.FormatInt(int64(tmp), 10)
++				priority := strconv.FormatUint(uint64(tcpPriority), 10)
+ 
+-				newAttrs = append(newAttrs, sdp.Attribute{
++				added = append(added, sdp.Attribute{
+ 					Key:   "candidate",
+-					Value: id + " 1 tcp 1671430143 " + ip + " " + port + " typ host tcptype passive",
++					Value: id + " 1 tcp " + priority + " " + ip + " " + tcpPort + " typ host tcptype passive",
+ 				})
+-				newAttrs = append(newAttrs, sdp.Attribute{
++				added = append(added, sdp.Attribute{
+ 					Key:   "candidate",
+-					Value: id + " 2 tcp 1671430143 " + ip + " " + port + " typ host tcptype passive",
++					Value: id + " 2 tcp " + priority + " " + ip + " " + tcpPort + " typ host tcptype passive",
+ 				})
+ 			}
+-
+-			newAttrs = append(newAttrs, firstMedia.Attributes[i:]...)
+-			firstMedia.Attributes = newAttrs
+ 		}
+ 	}
+ 
++	if len(added) == 0 {
++		return nil
++	}
++
++	newAttrs := append([]sdp.Attribute(nil), firstMedia.Attributes[:i]...)
++	newAttrs = append(newAttrs, added...)
++	newAttrs = append(newAttrs, firstMedia.Attributes[i:]...)
++	firstMedia.Attributes = newAttrs
++
+ 	return nil
+ }
+ 
+diff --git a/internal/protocols/webrtc/peer_connection_test.go b/internal/protocols/webrtc/peer_connection_test.go
+index 6cda3ae..f5df21a 100644
+--- a/internal/protocols/webrtc/peer_connection_test.go
++++ b/internal/protocols/webrtc/peer_connection_test.go
+@@ -1209,3 +1209,76 @@ func TestPeerConnectionRecomputeSequenceNumber(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestPeerConnectionAdditionalHostsPriority(t *testing.T) {
++	// A private address must be preferred over a public one, and the order of
++	// AdditionalHosts must be preserved inside the answer. Otherwise a client
++	// that can reach the server locally is free to nominate the public address
++	// and route its own media through a NAT gateway.
++	for _, ip := range []string{
++		"192.168.1.240", "10.1.2.3", "172.16.5.5", "127.0.0.1", "169.254.10.20",
++		"fd00::1", "fe80::1",
++	} {
++		udp, tcp := hostCandidatePriorities(ip)
++		require.Equal(t, uint32(2130706431), udp, "ip=%s", ip)
++		require.Equal(t, uint32(1671430143), tcp, "ip=%s", ip)
++	}
++
++	for _, ip := range []string{
++		"8.8.8.8", "203.0.113.10", "2001:4860:4860::8888", "", "not-an-ip",
++	} {
++		udp, tcp := hostCandidatePriorities(ip)
++		require.Equal(t, uint32(2130706431-(1<<16)), udp, "ip=%s", ip)
++		require.Equal(t, uint32(1671430143-(1<<16)), tcp, "ip=%s", ip)
++	}
++
++	localUDP, _ := hostCandidatePriorities("192.168.1.240")
++	publicUDP, _ := hostCandidatePriorities("203.0.113.10")
++	require.Greater(t, localUDP, publicUDP)
++
++	clientPC := &PeerConnection{
++		LocalRandomUDP:        true,
++		IPsFromInterfaces:     true,
++		IPsFromInterfacesList: []string{"lo"},
++		Log:                   test.NilLogger,
++	}
++	err := clientPC.Start()
++	require.NoError(t, err)
++	defer clientPC.Close()
++
++	ln, err := net.ListenPacket("udp4", ":0")
++	require.NoError(t, err)
++	defer ln.Close()
++	udpMux := webrtc.NewICEUDPMux(webrtcNilLogger, ln)
++
++	serverPC := &PeerConnection{
++		ICEUDPMux:       udpMux,
++		AdditionalHosts: []string{"192.168.1.240", "203.0.113.10"},
++		Publish:         true,
++		OutboundTracks: []*OutboundTrack{{
++			Caps: webrtc.RTPCodecCapability{
++				MimeType:  webrtc.MimeTypeAV1,
++				ClockRate: 90000,
++			},
++		}},
++		Log: test.NilLogger,
++	}
++	err = serverPC.Start()
++	require.NoError(t, err)
++	defer serverPC.Close()
++
++	offer, err := clientPC.CreatePartialOffer(false)
++	require.NoError(t, err)
++
++	answer, err := serverPC.CreateFullAnswer(offer, false)
++	require.NoError(t, err)
++
++	localIndex := strings.Index(answer.SDP, "192.168.1.240")
++	remoteIndex := strings.Index(answer.SDP, "203.0.113.10")
++	require.GreaterOrEqual(t, localIndex, 0)
++	require.GreaterOrEqual(t, remoteIndex, 0)
++	require.Less(t, localIndex, remoteIndex)
++
++	require.Contains(t, answer.SDP, "udp 2130706431 192.168.1.240")
++	require.Contains(t, answer.SDP, "udp 2130640895 203.0.113.10")
++}

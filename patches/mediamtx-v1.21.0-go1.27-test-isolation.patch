@@ -1,0 +1,16 @@
+diff --git a/internal/servers/webrtc/server_test.go b/internal/servers/webrtc/server_test.go
+index c220e51c..531b7fc0 100644
+--- a/internal/servers/webrtc/server_test.go
++++ b/internal/servers/webrtc/server_test.go
+@@ -1158,6 +1158,11 @@ func TestAuthError(t *testing.T) {
+ 		"whip post",
+ 	} {
+ 		t.Run(ca, func(t *testing.T) {
++			// Every subtest creates a new HTTP server on the same address.
++			// Do not reuse an idle connection that belonged to a server which
++			// was closed by an earlier package test.
++			http.DefaultClient.CloseIdleConnections()
++
+ 			s := &Server{
+ 				Address:      "127.0.0.1:8886",
+ 				ReadTimeout:  conf.Duration(10 * time.Second),

@@ -8,33 +8,37 @@
   const autoButton = document.getElementById("autoMode");
   const hlsButton = document.getElementById("hlsMode");
   const whepButton = document.getElementById("whepMode");
+  const HLS_WEAK_POLICY = window.HlsWeakNetworkPolicy;
+  if (!HLS_WEAK_POLICY) throw new Error("HLS weak-network policy is unavailable");
 
   const HLS_URL = "/live/index.m3u8";
   const WHEP_URL = "/rtc/live/whep";
-  const TARGET_BUFFER_SECONDS = 5;
+  const HLS_NORMAL_TARGET_LATENCY_SECONDS = 6;
   const HLS_OFFLINE_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000, 60000];
   const HLS_STARTUP_TIMEOUT_MS = 18000;
   const HLS_SERVER_FAILURE_FALLBACK_COUNT = 3;
-  const HLS_MAX_SYNC_PLAYBACK_RATE = 1.06;
-  const HLS_WEAK_TARGET_BUFFER_SECONDS = 8;
-  const HLS_WEAK_MAX_SYNC_PLAYBACK_RATE = 1.03;
+  const HLS_MAX_SYNC_PLAYBACK_RATE = 1.05;
+  const HLS_WEAK_TARGET_LATENCY_SECONDS = 12;
   const HLS_NORMAL_MAX_BUFFER_SECONDS = 10;
-  const HLS_WEAK_MAX_BUFFER_SECONDS = 16;
-  const HLS_WEAK_MAX_MAX_BUFFER_SECONDS = 24;
-  const HLS_WEAK_LOW_BUFFER_SECONDS = 2.5;
-  const HLS_WEAK_RECOVER_BUFFER_SECONDS = 4;
-  const HLS_WEAK_BANDWIDTH_RATIO = 1.35;
-  const HLS_WEAK_RECOVER_BANDWIDTH_RATIO = 1.7;
-  const HLS_WEAK_CONFIRM_SAMPLES = 2;
-  const HLS_WEAK_RECOVER_SAMPLES = 20;
+  const HLS_WEAK_LOW_BUFFER_SECONDS = 0.75;
   const HLS_NETWORK_MONITOR_INTERVAL_MS = 1000;
   const HLS_NETWORK_MONITOR_WARMUP_MS = 8000;
+  const HLS_WEAK_SAFE_POINT_MIN_BACKTRACK_SECONDS = 1.5;
+  const HLS_WEAK_SAFE_POINT_MAX_BACKTRACK_SECONDS = 6;
+  const HLS_WEAK_SAFE_POINT_RETRY_MS = 500;
+  const HLS_WEAK_SAFE_POINT_MAX_ATTEMPTS = 12;
+  const HLS_WEAK_SAFE_POINT_COOLDOWN_MS = 30000;
+  const HLS_INTENTIONAL_SEEK_SUPPRESS_MS = 1500;
+  const HLS_APPEND_TIMEOUT_MS = 15000;
+  const HLS_MAX_UNCHANGED_PLAYLIST_REFRESH = 12;
   const HLS_HARD_RESYNC_MARGIN_SECONDS = 6;
   const HLS_RECOVERY_MIN_BUFFER_SECONDS = 0.75;
+  const HLS_STALL_RECOVERY_CONFIRM_MS = 1000;
   const WHEP_SYNC_CHECK_INTERVAL_MS = 2000;
   const WHEP_SYNC_WARMUP_SAMPLES = 2;
   const WHEP_PLAYOUT_DRIFT_THRESHOLD_SECONDS = 0.25;
   const WHEP_PLAYOUT_DRIFT_CLEAR_SECONDS = 0.12;
+  const WHEP_PLAYOUT_BASELINE_MAX_SPREAD_MS = 50;
   const WHEP_JITTER_DRIFT_THRESHOLD_SECONDS = 0.35;
   const WHEP_JITTER_DRIFT_CLEAR_SECONDS = 0.18;
   const WHEP_SYNC_DRIFT_REQUIRED_SAMPLES = 3;
@@ -70,6 +74,9 @@
   let hlsRecoveryTimer = 0;
   let hlsStallStartedAt = 0;
   let whepSyncTimer = 0;
+  let whepSyncRecoveryTimer = 0;
+  let whepSyncGeneration = 0;
+  let whepPlaybackPaused = false;
   let whepSyncDriftSamples = 0;
   let whepLastJitterStats = null;
   let whepLastResyncAt = 0;
@@ -81,10 +88,13 @@
   let whepSessionKeepaliveTimer = 0;
   let hlsNetworkMonitorTimer = 0;
   let hlsWeakNetworkMode = false;
+  // Diagnostic-only; does not directly trigger weak-network transitions.
   let hlsLowBufferSamples = 0;
-  let hlsHealthySamples = 0;
-  let hlsNetworkMonitorStartedAt = 0;
-  let hlsLastStallAt = 0;
+  let hlsWeakPolicyState = HLS_WEAK_POLICY.createState();
+  let hlsNetworkPlaybackStartedAt = 0;
+  let hlsWeakSafePointTimer = 0;
+  let hlsLastWeakSafePointAt = 0;
+  let hlsIntentionalWeakSeekUntil = 0;
   let hlsConsecutiveNetworkErrors = 0;
   let hlsPendingNetworkRecovery = "";
   let whepReconnectTimer = 0;
@@ -94,6 +104,9 @@
   let whepLastIceSummary = "";
   let hlsOfflineRetryTimer = 0;
   let hlsOfflineRetryAttempts = 0;
+  let playerVideoListeners = [];
+  const playerTimeouts = new Set();
+  let whepAttemptCleanup = null;
 
   video.muted = true;
   video.autoplay = true;
@@ -268,7 +281,8 @@
       "“硬件解码 / 软件解码”为浏览器 MediaCapabilities powerEfficient 能力推断，不是驱动级解码器确认。";
   }
 
-  async function detectCodecCapability(metadata) {
+  async function detectCodecCapability(metadata, isCurrent = () => true) {
+    if (!isCurrent()) return null;
     const myCapabilityGeneration = ++capabilityGeneration;
     if (!metadata || !metadata.videoCodec) {
       codecCapability = null;
@@ -292,7 +306,7 @@
       queryDecodingInfo("media-source", metadata),
       queryDecodingInfo("webrtc", metadata)
     ]);
-    if (myCapabilityGeneration !== capabilityGeneration) return codecCapability;
+    if (myCapabilityGeneration !== capabilityGeneration || !isCurrent()) return codecCapability;
 
     base.mediaSource = mediaSourceInfo;
     base.webrtc = webrtcInfo;
@@ -334,7 +348,7 @@
     return null;
   }
 
-  // BEGIN R33 WHEP OPUS STEREO
+  // BEGIN V1.35 WHEP OPUS STEREO
   // Chrome/Chromium can decode a two-channel Opus RTP stream as mono unless
   // the SDP fmtp explicitly negotiates stereo. Keep this workaround local to
   // the bundled WHEP player: the browser offer advertises stereo reception,
@@ -405,7 +419,7 @@
 
     return lines.join(newline) + (hadTrailingNewline ? newline : "");
   }
-  // END R33 WHEP OPUS STEREO
+  // END V1.35 WHEP OPUS STEREO
 
   function isWhepUnsupportedCodecResponse(response, body) {
     if (!response || response.ok) return false;
@@ -519,14 +533,122 @@
     return false;
   }
 
+  function bufferedRangesSnapshot(media) {
+    const snapshot = [];
+    try {
+      const ranges = media.buffered;
+      for (let i = 0; i < ranges.length; i += 1) {
+        snapshot.push({ start: ranges.start(i), end: ranges.end(i) });
+      }
+    } catch (_) {}
+    return snapshot;
+  }
+
+  function moveHlsToWeakNetworkSafePoint(instance) {
+    if (
+      !instance ||
+      instance !== hls ||
+      activeMode !== "hls" ||
+      !hlsWeakNetworkMode ||
+      hlsLastWeakSafePointAt > 0 ||
+      video.paused ||
+      video.seeking ||
+      video.ended ||
+      video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+      Date.now() - hlsLastWeakSafePointAt < HLS_WEAK_SAFE_POINT_COOLDOWN_MS
+    ) {
+      return false;
+    }
+
+    // A real stall can make hls.js raise its calculated target latency. Keep
+    // retries on the explicit weak-network target so a recovered connection
+    // does not inherit an unnecessarily deep latency before the safe seek.
+    try { instance.targetLatency = HLS_WEAK_TARGET_LATENCY_SECONDS; } catch (_) {}
+    const current = Number(video.currentTime);
+    const ranges = bufferedRangesSnapshot(video);
+    const target = HLS_WEAK_POLICY.weakSafePoint(
+      ranges, current, Number(instance.liveSyncPosition),
+      HLS_WEAK_SAFE_POINT_MIN_BACKTRACK_SECONDS,
+      HLS_WEAK_SAFE_POINT_MAX_BACKTRACK_SECONDS
+    );
+    if (
+      !Number.isFinite(current) ||
+      !Number.isFinite(target) ||
+      !HLS_WEAK_POLICY.isSafeBacktrack(
+        ranges,
+        current,
+        target,
+        HLS_WEAK_SAFE_POINT_MIN_BACKTRACK_SECONDS,
+        HLS_WEAK_SAFE_POINT_MAX_BACKTRACK_SECONDS
+      )
+    ) {
+      return false;
+    }
+
+    try {
+      const now = Date.now();
+      hlsIntentionalWeakSeekUntil = now + HLS_INTENTIONAL_SEEK_SUPPRESS_MS;
+      hlsLastWeakSafePointAt = now;
+      hlsStallStartedAt = 0;
+      video.playbackRate = 1;
+      video.currentTime = target;
+      // A successful assignment proves only that a seek was issued. The next
+      // monitor/seeked sample must measure the actual media buffer again.
+      return true;
+    } catch (_) {
+      hlsIntentionalWeakSeekUntil = 0;
+      hlsLastWeakSafePointAt = 0;
+      return false;
+    }
+  }
+
+  function hlsWeakBuildingMessage() {
+    return hlsWeakPolicyState.weakNetworkClass === "rtt"
+      ? "检测到高请求延迟，正在使用整段模式并建立安全缓冲…"
+      : "检测到弱网（带宽/丢包），正在建立弱网安全缓冲…";
+  }
+
+  function updateHlsWeakBufferReadiness(instance) {
+    if (instance !== hls || activeMode !== "hls" || !hlsWeakNetworkMode || video.seeking) return;
+    const wasReady = hlsWeakPolicyState.weakBufferReady;
+    const bufferAhead = bufferedAheadSeconds(video);
+    const ready = HLS_WEAK_POLICY.sampleBufferReadiness(hlsWeakPolicyState, bufferAhead);
+    if (ready !== wasReady) {
+      showStatus(ready
+        ? `弱网稳定缓冲已建立 · 实际前向缓冲约 ${bufferAhead.toFixed(1)} 秒`
+        : hlsWeakBuildingMessage(), ready ? 4200 : 0);
+    }
+  }
+
+  function scheduleHlsWeakNetworkSafePoint(instance) {
+    clearTimeout(hlsWeakSafePointTimer);
+    hlsWeakSafePointTimer = 0;
+    let attempts = 0;
+    const attempt = () => {
+      hlsWeakSafePointTimer = 0;
+      if (instance !== hls || activeMode !== "hls" || !hlsWeakNetworkMode) return;
+      updateHlsWeakBufferReadiness(instance);
+      if (hlsWeakPolicyState.weakBufferReady) return;
+      attempts += 1;
+      if (moveHlsToWeakNetworkSafePoint(instance)) return;
+      if (attempts < HLS_WEAK_SAFE_POINT_MAX_ATTEMPTS) {
+        hlsWeakSafePointTimer = setTimeout(attempt, HLS_WEAK_SAFE_POINT_RETRY_MS);
+      }
+    };
+    hlsWeakSafePointTimer = setTimeout(attempt, 0);
+  }
+
   function resetHlsNetworkMonitor() {
     clearInterval(hlsNetworkMonitorTimer);
+    clearTimeout(hlsWeakSafePointTimer);
     hlsNetworkMonitorTimer = 0;
+    hlsWeakSafePointTimer = 0;
     hlsWeakNetworkMode = false;
     hlsLowBufferSamples = 0;
-    hlsHealthySamples = 0;
-    hlsNetworkMonitorStartedAt = 0;
-    hlsLastStallAt = 0;
+    hlsWeakPolicyState = HLS_WEAK_POLICY.createState();
+    hlsNetworkPlaybackStartedAt = 0;
+    hlsLastWeakSafePointAt = 0;
+    hlsIntentionalWeakSeekUntil = 0;
     hlsConsecutiveNetworkErrors = 0;
     hlsPendingNetworkRecovery = "";
   }
@@ -558,7 +680,7 @@
     // Give the existing pipeline a chance to resume first; only re-bootstrap
     // if playback is still starved after the network has returned.
     if (mode === "reload") {
-      setTimeout(() => {
+      schedulePlayerTimeout(() => {
         if (
           myGeneration !== generation ||
           activeMode !== "hls" ||
@@ -577,33 +699,52 @@
     return true;
   }
 
-  function applyHlsNetworkProfile(instance, weak, reason = "") {
+  function applyHlsNetworkProfile(instance, weak, reason = "", recoveryPath = "", weakClass = "bandwidth-loss") {
     if (!instance || instance !== hls) return;
-    if (hlsWeakNetworkMode === weak) return;
+    // A class stays fixed until recovery, except an RTT profile may be upgraded
+    // once when an explicit fatal network error supplies loss evidence.
+    const lossUpgrade = weak && hlsWeakNetworkMode && weakClass === "bandwidth-loss" &&
+      hlsWeakPolicyState.weakNetworkClass === "rtt";
+    if (hlsWeakNetworkMode === weak && !lossUpgrade) return;
     hlsWeakNetworkMode = weak;
     hlsLowBufferSamples = 0;
-    hlsHealthySamples = 0;
-    const config = instance.config || {};
-    config.liveSyncDuration = weak ? HLS_WEAK_TARGET_BUFFER_SECONDS : TARGET_BUFFER_SECONDS;
-    config.liveMaxLatencyDuration = weak ? 24 : 18;
-    config.maxBufferLength = weak ? HLS_WEAK_MAX_BUFFER_SECONDS : HLS_NORMAL_MAX_BUFFER_SECONDS;
-    config.maxMaxBufferLength = weak ? HLS_WEAK_MAX_MAX_BUFFER_SECONDS : 15;
-    config.maxLiveSyncPlaybackRate = weak
-      ? HLS_WEAK_MAX_SYNC_PLAYBACK_RATE
-      : HLS_MAX_SYNC_PLAYBACK_RATE;
     if (weak) {
-      showStatus(
-        `检测到弱网${reason ? `（${reason}）` : ""}，已切换稳定缓冲模式 · 目标约 ${HLS_WEAK_TARGET_BUFFER_SECONDS} 秒。`,
-        4200
-      );
+      HLS_WEAK_POLICY.markWeakEntry(hlsWeakPolicyState, Date.now(), reason, weakClass);
     } else {
-      showStatus(`网络持续稳定，已恢复低延迟模式 · 目标约 ${TARGET_BUFFER_SECONDS} 秒。`, 3200);
+      HLS_WEAK_POLICY.markWeakRecovery(hlsWeakPolicyState, recoveryPath);
+    }
+    const config = instance.config || {};
+    const profile = HLS_WEAK_POLICY.profileFor(weak ? hlsWeakPolicyState.weakNetworkClass : false);
+    const targetLatency = profile.targetLatency;
+    // Keep parts for bandwidth/loss. Only sustained relative request overhead
+    // with transport headroom selects complete segments.
+    config.lowLatencyMode = profile.lowLatencyMode;
+    config.liveSyncDuration = targetLatency;
+    config.liveMaxLatencyDuration = profile.liveMaxLatencyDuration;
+    config.maxBufferLength = profile.maxBufferLength;
+    config.maxMaxBufferLength = profile.maxMaxBufferLength;
+    config.maxLiveSyncPlaybackRate = profile.maxLiveSyncPlaybackRate;
+    try {
+      // The public setter resets hls.js's accumulated stall latency and marks
+      // the new target as an explicit runtime update.
+      instance.targetLatency = targetLatency;
+    } catch (_) {}
+    if (weak) {
+      try { video.playbackRate = 1; } catch (_) {}
+      showStatus(hlsWeakBuildingMessage(), 0);
+      if (!lossUpgrade) scheduleHlsWeakNetworkSafePoint(instance);
+    } else {
+      clearTimeout(hlsWeakSafePointTimer);
+      hlsWeakSafePointTimer = 0;
+      hlsIntentionalWeakSeekUntil = 0;
+      hlsLastWeakSafePointAt = 0;
+      const recoveryLabel = recoveryPath === "stable" ? "深缓冲稳定恢复" : "高带宽快速恢复";
+      showStatus(`网络持续稳定（${recoveryLabel}），已恢复低延迟模式 · 目标直播延迟约 ${HLS_NORMAL_TARGET_LATENCY_SECONDS} 秒。`, 3200);
     }
   }
 
   function armHlsNetworkMonitor(myGeneration, instance) {
     clearInterval(hlsNetworkMonitorTimer);
-    hlsNetworkMonitorStartedAt = Date.now();
     hlsNetworkMonitorTimer = setInterval(() => {
       if (
         myGeneration !== generation ||
@@ -612,43 +753,77 @@
       ) {
         return;
       }
-      if (Date.now() - hlsNetworkMonitorStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS) return;
-
+      if (
+        !hlsNetworkPlaybackStartedAt &&
+        !video.paused &&
+        Number(video.currentTime || 0) > 0.5
+      ) {
+        hlsNetworkPlaybackStartedAt = Date.now();
+      }
       const bufferAhead = bufferedAheadSeconds(video);
       const bandwidth = Number(instance.bandwidthEstimate);
       const streamBitrate = Number(lastStreamMetadata && lastStreamMetadata.bandwidth) || 0;
-      const bandwidthWeak = Number.isFinite(bandwidth) && streamBitrate > 0 &&
-        bandwidth < streamBitrate * HLS_WEAK_BANDWIDTH_RATIO;
+      const ratio = HLS_WEAK_POLICY.bandwidthRatio(bandwidth, streamBitrate);
+      hlsWeakPolicyState.lastBandwidthRatio = ratio;
+      const earlyClass = HLS_WEAK_POLICY.sampleNetworkTrend(hlsWeakPolicyState, {
+        now: Date.now(), bufferAhead, bandwidthRatio: ratio,
+        paused: video.paused || !hlsNetworkPlaybackStartedAt,
+        seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+      });
+      if (!hlsWeakNetworkMode && earlyClass) {
+        applyHlsNetworkProfile(instance, true, "安全缓冲持续下降或即将耗尽", "", earlyClass);
+        return;
+      }
+      if (hlsWeakNetworkMode) {
+        updateHlsWeakBufferReadiness(instance);
+        // Retry on the existing monitor after the bounded startup retry loop.
+        // At most one successful intentional backtrack per weak episode.
+        if (!hlsWeakPolicyState.weakBufferReady && !hlsWeakSafePointTimer) {
+          moveHlsToWeakNetworkSafePoint(instance);
+        }
+      }
+      if (
+        !hlsNetworkPlaybackStartedAt ||
+        Date.now() - hlsNetworkPlaybackStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS ||
+        video.paused || video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+      ) {
+        return;
+      }
       const bufferWeak = !video.paused && bufferAhead < HLS_WEAK_LOW_BUFFER_SECONDS;
+      const bandwidthRisk = HLS_WEAK_POLICY.isBandwidthRisk({
+        paused: video.paused,
+        bandwidthRatio: ratio,
+        bufferAhead
+      });
 
-      if (bandwidthWeak || bufferWeak) {
+      if (bufferWeak) {
         hlsLowBufferSamples += 1;
-        hlsHealthySamples = 0;
       } else {
         hlsLowBufferSamples = Math.max(0, hlsLowBufferSamples - 1);
       }
-
-      if (!hlsWeakNetworkMode && hlsLowBufferSamples >= HLS_WEAK_CONFIRM_SAMPLES) {
+      const lowBandwidth = HLS_WEAK_POLICY.sampleLowBandwidth(
+        hlsWeakPolicyState,
+        bandwidthRisk
+      );
+      const lowBandwidthConfirmed = lowBandwidth.confirmed;
+      if (!hlsWeakNetworkMode && lowBandwidthConfirmed) {
         applyHlsNetworkProfile(
           instance,
           true,
-          bandwidthWeak ? "可用带宽接近直播码率" : "前向缓冲持续偏低"
+          "可用带宽持续不足且安全缓冲偏低"
         );
         return;
       }
 
       if (!hlsWeakNetworkMode) return;
-      const bandwidthHealthy = !Number.isFinite(bandwidth) || streamBitrate <= 0 ||
-        bandwidth >= streamBitrate * HLS_WEAK_RECOVER_BANDWIDTH_RATIO;
-      const bufferHealthy = bufferAhead >= HLS_WEAK_RECOVER_BUFFER_SECONDS;
-      const stallQuiet = !hlsLastStallAt || Date.now() - hlsLastStallAt >= 15000;
-      if (bandwidthHealthy && bufferHealthy && stallQuiet) {
-        hlsHealthySamples += 1;
-      } else {
-        hlsHealthySamples = 0;
-      }
-      if (hlsHealthySamples >= HLS_WEAK_RECOVER_SAMPLES) {
-        applyHlsNetworkProfile(instance, false);
+      const recovery = HLS_WEAK_POLICY.sampleRecovery(hlsWeakPolicyState, {
+        bandwidthRatio: ratio,
+        bufferAhead,
+        noRecentNetworkErrors: hlsConsecutiveNetworkErrors === 0 && hlsWeakPolicyState.weakBufferReady,
+        now: Date.now()
+      });
+      if (recovery.path) {
+        applyHlsNetworkProfile(instance, false, "", recovery.path);
       }
     }, HLS_NETWORK_MONITOR_INTERVAL_MS);
   }
@@ -663,13 +838,32 @@
   }
 
   function markHlsStall() {
-    if (!hlsStallStartedAt) hlsStallStartedAt = Date.now();
-    hlsLastStallAt = Date.now();
-    const pastStartupWarmup = hlsNetworkMonitorStartedAt &&
-      Date.now() - hlsNetworkMonitorStartedAt >= HLS_NETWORK_MONITOR_WARMUP_MS &&
+    // A renewed stall invalidates the pending sustained-playing confirmation.
+    clearTimeout(hlsRecoveryTimer);
+    hlsRecoveryTimer = 0;
+    if (Date.now() < hlsIntentionalWeakSeekUntil) return;
+    const now = Date.now();
+    if (!hlsStallStartedAt) hlsStallStartedAt = now;
+    const pastStartupWarmup = hlsNetworkPlaybackStartedAt &&
+      now - hlsNetworkPlaybackStartedAt >= HLS_NETWORK_MONITOR_WARMUP_MS &&
       Number(video.currentTime || 0) > 0.5;
-    if (hls && activeMode === "hls" && pastStartupWarmup) {
-      applyHlsNetworkProfile(hls, true, "发生播放卡顿");
+    const stallBandwidth = Number(hls && hls.bandwidthEstimate);
+    const streamBitrate = Number(lastStreamMetadata && lastStreamMetadata.bandwidth) || 0;
+    const stallBandwidthRatio = HLS_WEAK_POLICY.bandwidthRatio(stallBandwidth, streamBitrate);
+    // Repeated HTMLMediaElement stalls can also come from a temporarily busy
+    // decoder (especially AV1 software decode) while transport capacity is
+    // clearly healthy. Do not let those events switch an otherwise normal
+    // low-latency session into weak-network mode. If hls.js has no usable
+    // estimate we still fail safe and allow the repeated-stall trigger.
+    const stall = HLS_WEAK_POLICY.recordStall(hlsWeakPolicyState, {
+      now,
+      bandwidthRatio: stallBandwidthRatio,
+      bufferAhead: bufferedAheadSeconds(video),
+      noRecentNetworkErrors: hlsConsecutiveNetworkErrors === 0,
+      pastStartupWarmup: Boolean(pastStartupWarmup)
+    });
+    if (hls && activeMode === "hls" && !hlsWeakNetworkMode && stall.enterWeak) {
+      applyHlsNetworkProfile(hls, true, "短时间内重复发生播放卡顿");
     }
   }
 
@@ -680,20 +874,28 @@
       if (
         myGeneration !== generation ||
         activeMode !== "hls" ||
-        hls !== instance ||
-        video.paused ||
-        video.seeking
+        hls !== instance
       ) {
-        hlsStallStartedAt = 0;
         return;
       }
+      if (
+        video.paused ||
+        video.seeking ||
+        video.ended
+      ) {
+        return;
+      }
+
+      // Match the player's one-second stall-detection horizon: a brief
+      // `playing` pulse is not enough to end the physical stall episode.
+      HLS_WEAK_POLICY.endStallEpisode(hlsWeakPolicyState);
 
       const latency = Number(instance.latency);
       const targetLatency = Number(instance.targetLatency);
       const liveSyncPosition = Number(instance.liveSyncPosition);
       const effectiveTarget = Number.isFinite(targetLatency) && targetLatency > 0
         ? targetLatency
-        : TARGET_BUFFER_SECONDS;
+        : HLS_NORMAL_TARGET_LATENCY_SECONDS;
       const excessLatency = Number.isFinite(latency)
         ? latency - effectiveTarget
         : 0;
@@ -704,6 +906,7 @@
       // target point is already buffered. Seeking only to buffered media avoids
       // trading A/V drift for another starvation event.
       if (
+        !hlsWeakNetworkMode &&
         excessLatency >= HLS_HARD_RESYNC_MARGIN_SECONDS &&
         bufferAhead >= HLS_RECOVERY_MIN_BUFFER_SECONDS &&
         Number.isFinite(liveSyncPosition) &&
@@ -717,7 +920,7 @@
         } catch (_) {}
       }
       hlsStallStartedAt = 0;
-    }, 450);
+    }, HLS_STALL_RECOVERY_CONFIRM_MS);
   }
 
   function clearWhepReconnectTimers() {
@@ -752,15 +955,16 @@
         myGeneration !== generation ||
         activeMode !== "whep" ||
         peerConnection !== connection ||
-        connection.connectionState === "connected"
+        (connection && connection.connectionState === "connected")
       ) {
         return;
       }
-      if (
-        requestedMode === "auto" &&
-        whepReconnectAttempts >= 2 &&
-        effectiveHlsSupport() !== false
-      ) {
+      if (requestedMode === "auto" && whepReconnectAttempts >= 2) {
+        codecFallbackTried = true;
+        if (effectiveHlsSupport() === false) {
+          showStatus(unsupportedCodecMessage(), 0);
+          return;
+        }
         startHls("WebRTC 弱网恢复多次失败", "WebRTC 网络持续不稳定，已切换 LL-HLS 稳定播放模式");
         return;
       }
@@ -769,8 +973,16 @@
   }
 
   function resetWhepSyncMonitor() {
+    whepSyncGeneration += 1;
     clearInterval(whepSyncTimer);
     whepSyncTimer = 0;
+    clearTimeout(whepSyncRecoveryTimer);
+    playerTimeouts.delete(whepSyncRecoveryTimer);
+    whepSyncRecoveryTimer = 0;
+    resetWhepSyncSamples();
+  }
+
+  function resetWhepSyncSamples() {
     whepSyncDriftSamples = 0;
     whepLastJitterStats = null;
     whepLastSyncDiffSeconds = 0;
@@ -811,6 +1023,7 @@
 
   function armWhepSyncMonitor(myGeneration, connection) {
     resetWhepSyncMonitor();
+    const syncGeneration = whepSyncGeneration;
     whepSyncTimer = setInterval(async () => {
       if (
         myGeneration !== generation ||
@@ -821,13 +1034,21 @@
         return;
       }
 
+      if (video.paused || video.seeking) {
+        resetWhepSyncSamples();
+        return;
+      }
       let reports;
       try {
         reports = await connection.getStats();
       } catch (_) {
         return;
       }
-      if (myGeneration !== generation || peerConnection !== connection) return;
+      if (myGeneration !== generation || peerConnection !== connection || syncGeneration !== whepSyncGeneration) return;
+      if (video.paused || video.seeking) {
+        resetWhepSyncSamples();
+        return;
+      }
 
       const snapshot = collectWhepJitterSnapshot(reports);
       const previous = whepLastJitterStats;
@@ -853,11 +1074,20 @@
         // while still catching network-induced A/V drift after startup.
         if (!Number.isFinite(whepPlayoutBaselineMs)) {
           whepPlayoutBaselineSamples.push(rawOffsetMs);
+          if (whepPlayoutBaselineSamples.length > 3) whepPlayoutBaselineSamples.shift();
           if (whepPlayoutBaselineSamples.length < 3) {
             whepLastSyncMetric = "estimated-playout-calibrating";
             return;
           }
           const sorted = [...whepPlayoutBaselineSamples].sort((a, b) => a - b);
+          // Browser jitter buffers converge after joining. A baseline captured
+          // while the offset is moving turns improved sync into false drift.
+          // Calibrate only from a stable rolling window; retain the existing
+          // thresholds for drift after calibration.
+          if (sorted[sorted.length - 1] - sorted[0] > WHEP_PLAYOUT_BASELINE_MAX_SPREAD_MS) {
+            whepLastSyncMetric = "estimated-playout-calibrating";
+            return;
+          }
           whepPlayoutBaselineMs = sorted[Math.floor(sorted.length / 2)];
           whepPlayoutBaselineSamples = [];
           whepLastSyncMetric = "estimated-playout-baseline";
@@ -908,12 +1138,17 @@
         clearInterval(whepSyncTimer);
         whepSyncTimer = 0;
         showStatus("检测到网络抖动造成持续音画缓冲偏移，正在重新同步 WebRTC…", 0);
-        setTimeout(() => {
+        whepSyncRecoveryTimer = schedulePlayerTimeout(() => {
+          whepSyncRecoveryTimer = 0;
           if (
             myGeneration === generation &&
             activeMode === "whep" &&
             peerConnection === connection
           ) {
+            if (video.paused || video.seeking) {
+              armWhepSyncMonitor(myGeneration, connection);
+              return;
+            }
             startWhep("网络恢复后重新建立同步缓冲");
           }
         }, 150);
@@ -932,6 +1167,37 @@
     try {
       video.load();
     } catch (_) {}
+  }
+
+  function addPlayerVideoListener(type, listener, options = false) {
+    const capture = typeof options === "boolean"
+      ? options
+      : Boolean(options && options.capture);
+    video.addEventListener(type, listener, options);
+    playerVideoListeners.push({ type, listener, capture });
+  }
+
+  function clearPlayerVideoListeners() {
+    for (const { type, listener, capture } of playerVideoListeners) {
+      try {
+        video.removeEventListener(type, listener, capture);
+      } catch (_) {}
+    }
+    playerVideoListeners = [];
+  }
+
+  function schedulePlayerTimeout(callback, delay) {
+    const timer = setTimeout(() => {
+      playerTimeouts.delete(timer);
+      callback();
+    }, delay);
+    playerTimeouts.add(timer);
+    return timer;
+  }
+
+  function clearPlayerTimeouts() {
+    for (const timer of playerTimeouts) clearTimeout(timer);
+    playerTimeouts.clear();
   }
 
   function resetWhepSessionKeepalive() {
@@ -958,12 +1224,12 @@
           credentials: "same-origin"
         });
         if (response.status === 404 || response.status === 410) {
-          resetWhepSessionKeepalive();
           if (
             myGeneration === generation &&
             activeMode === "whep" &&
             whepSessionUrl === url
           ) {
+            resetWhepSessionKeepalive();
             startWhep("会话状态已过期，重新建立安全会话");
           }
         }
@@ -982,6 +1248,17 @@
   }
 
   function stopCurrentPlayer() {
+    // Per-player media listeners outlive an Hls instance unless they are
+    // explicitly removed. Clear the complete previous generation before
+    // clearVideo() can emit media events or a new generation is attached.
+    clearPlayerVideoListeners();
+    clearPlayerTimeouts();
+    capabilityGeneration += 1;
+    if (whepAttemptCleanup) {
+      const cleanup = whepAttemptCleanup;
+      whepAttemptCleanup = null;
+      cleanup();
+    }
     clearTimeout(hlsOfflineRetryTimer);
     hlsOfflineRetryTimer = 0;
     resetHlsSyncRecovery();
@@ -1011,6 +1288,7 @@
       } catch (_) {}
       hls = null;
     }
+    window.__liveHls = null;
 
     if (peerConnection) {
       try {
@@ -1025,17 +1303,11 @@
     clearVideo();
   }
 
-  function describeHttpError(response, body) {
-    const detail = String(body || "").trim();
-    if (detail) {
-      // Diagnostic detail stays in DevTools only. Never render MediaMTX or
-      // upstream response bodies into the public viewer status overlay.
-      console.debug("upstream HTTP error detail", {
-        status: response.status,
-        statusText: response.statusText,
-        detail
-      });
-    }
+  function describeHttpError(response) {
+    // Response bodies are deliberately neither rendered nor logged. Even
+    // though the gateway sanitizes current MediaMTX errors, this prevents a
+    // future proxy regression from persisting private backend details in a
+    // viewer's DevTools console or exported browser diagnostics.
     return `${response.status} ${response.statusText || "请求失败"}`;
   }
 
@@ -1079,22 +1351,24 @@
     };
   }
 
-  async function inspectManifest() {
+  async function inspectManifest(signal) {
     const response = await fetch(HLS_URL, {
       cache: "no-store",
-      credentials: "same-origin"
+      credentials: "same-origin",
+      signal
     });
     if (!response.ok) {
-      const body = await response.text();
-      const error = new Error(`HLS 清单暂不可用：${describeHttpError(response, body)}`);
+      const error = new Error(`HLS 清单暂不可用：${describeHttpError(response)}`);
       error.httpStatus = response.status;
       throw error;
     }
-    const metadata = parseManifest(await response.text());
+    return parseManifest(await response.text());
+  }
+
+  function applyManifestMetadata(metadata) {
     lastStreamMetadata = metadata;
     setDetectedCodec(metadata.videoCodec);
     setDetectedAudioCodec(metadata.audioCodec);
-    return metadata;
   }
 
   function clearDetectedStreamMetadata() {
@@ -1106,16 +1380,13 @@
     renderCodecCapability(null);
   }
 
-  async function refreshWhepStreamMetadata(myGeneration) {
-    const previousCodecFamily = codecFamily(detectedCodec);
+  async function refreshWhepStreamMetadata(myGeneration, connection, signal, previousCodecFamily) {
+    const isCurrent = () => myGeneration === generation && activeMode === "whep" &&
+      peerConnection === connection && !signal.aborted;
     try {
-      const metadata = await inspectManifest();
-      if (
-        myGeneration !== generation ||
-        activeMode !== "whep"
-      ) {
-        return false;
-      }
+      const metadata = await inspectManifest(signal);
+      if (!isCurrent()) return false;
+      applyManifestMetadata(metadata);
 
       const currentCodecFamily = codecFamily(metadata.videoCodec);
       if (
@@ -1128,21 +1399,17 @@
         // into the replacement WHEP session.
         codecFallbackTried = false;
       }
-      await detectCodecCapability(metadata);
-      return myGeneration === generation && activeMode === "whep";
+      await detectCodecCapability(metadata, isCurrent);
+      return isCurrent();
     } catch (_) {
-      if (myGeneration === generation && activeMode === "whep") {
-        // The HLS muxer can briefly disappear between publishers. Clearing
-        // stale metadata lets the negotiated WHEP answer identify the new
-        // codec instead of continuing to display the previous publisher.
-        clearDetectedStreamMetadata();
-      }
+      // Setup already discarded old-stream hints. An advisory failure must
+      // not erase a codec since identified by the successful WHEP answer.
       return false;
     }
   }
 
-  async function waitForIceGathering(connection, timeoutMs) {
-    if (connection.iceGatheringState === "complete") return;
+  async function waitForIceGathering(connection, timeoutMs, signal) {
+    if (connection.iceGatheringState === "complete" || signal.aborted) return;
 
     await new Promise(resolve => {
       let completed = false;
@@ -1151,6 +1418,7 @@
         completed = true;
         clearTimeout(timer);
         connection.removeEventListener("icegatheringstatechange", check);
+        signal.removeEventListener("abort", finish);
         resolve();
       };
       const check = () => {
@@ -1158,6 +1426,7 @@
       };
       const timer = setTimeout(finish, timeoutMs);
       connection.addEventListener("icegatheringstatechange", check);
+      signal.addEventListener("abort", finish, { once: true });
     });
   }
 
@@ -1266,7 +1535,9 @@
         return;
       }
 
-      whepLastIceSummary = await whepIceSummary(connection);
+      const summary = await whepIceSummary(connection);
+      if (myGeneration !== generation || activeMode !== "whep" || peerConnection !== connection) return;
+      whepLastIceSummary = summary;
       const message = `WHEP 已返回 201，但 WebRTC 媒体通道在 ${Math.round(WHEP_CONNECT_TIMEOUT_MS / 1000)} 秒内没有建立。\n${whepLastIceSummary}`;
       if (requestedMode === "auto" && effectiveHlsSupport() !== false) {
         startHls("WebRTC ICE/DTLS 建立超时", `${message}\n已切换 LL-HLS 兼容播放模式`);
@@ -1290,7 +1561,7 @@
     if (typeof video.requestVideoFrameCallback === "function") {
       videoFrameCallbackId = video.requestVideoFrameCallback(markFrameDecoded);
     } else {
-      video.addEventListener("loadeddata", markFrameDecoded, { once: true });
+      addPlayerVideoListener("loadeddata", markFrameDecoded, { once: true });
     }
 
     watchdogTimer = setTimeout(async () => {
@@ -1344,8 +1615,12 @@
   }
 
   async function startWhep(reason = "") {
+    const preservePaused = activeMode === "whep" && whepPlaybackPaused;
+    const previousCodecFamily = codecFamily(detectedCodec);
     const myGeneration = ++generation;
     stopCurrentPlayer();
+    whepPlaybackPaused = preservePaused;
+    video.autoplay = !preservePaused;
     whepAudioTrackSeen = false;
     activeMode = "whep";
     setModeButtons();
@@ -1359,43 +1634,93 @@
       return;
     }
 
-    await refreshWhepStreamMetadata(myGeneration);
-    if (
-      myGeneration !== generation ||
-      activeMode !== "whep"
-    ) {
-      return;
-    }
-
-    if (detectedCodec && effectiveWhepSupport() === false) {
-      if (requestedMode === "auto") {
-        if (effectiveHlsSupport() === false) {
-          showStatus(unsupportedCodecMessage(), 0);
-          return;
-        }
-        startHls("设备未声明当前编码的 WebRTC 接收能力", WHEP_CODEC_FALLBACK_MESSAGE);
-        return;
-      }
-      showStatus(
-        `当前浏览器未声明 ${detectedCodecName} 的 WebRTC 接收能力。\n` +
-        "仍可切换 LL-HLS 测试系统媒体解码器。",
-        0
-      );
-      return;
-    }
-
+    // Every entry (manual, AUTO, heartbeat and sync recovery) establishes WHEP
+    // independently of HLS. Discard old-stream hints before fetching new ones.
+    clearDetectedStreamMetadata();
     const connection = new RTCPeerConnection();
     peerConnection = connection;
     const playbackStream = new MediaStream();
     connection.addTransceiver("video", { direction: "recvonly" });
     connection.addTransceiver("audio", { direction: "recvonly" });
 
+    let attemptActive = true;
+    let createdSessionUrl = "";
+    let releasedSessionUrl = "";
+    let setupTimer = 0;
+    let metadataTimer = 0;
+    let resolveCancellation;
+    const cancelled = new Promise(resolve => { resolveCancellation = resolve; });
+    const metadataController = new AbortController();
+    const isCurrentConnection = () => attemptActive && myGeneration === generation &&
+      activeMode === "whep" && peerConnection === connection;
+    const releaseCreatedSession = () => {
+      if (!createdSessionUrl) return;
+      if (peerConnection === connection && whepSessionUrl === createdSessionUrl) whepSessionUrl = "";
+      if (releasedSessionUrl !== createdSessionUrl) {
+        releasedSessionUrl = createdSessionUrl;
+        deleteWhepSession(createdSessionUrl);
+      }
+    };
+    const clearSetupTimer = () => {
+      clearTimeout(setupTimer);
+      playerTimeouts.delete(setupTimer);
+      setupTimer = 0;
+    };
+    const cleanupAttempt = () => {
+      attemptActive = false;
+      clearSetupTimer();
+      clearTimeout(metadataTimer);
+      playerTimeouts.delete(metadataTimer);
+      metadataController.abort();
+      resolveCancellation();
+      releaseCreatedSession();
+    };
+    whepAttemptCleanup = cleanupAttempt;
+    setupTimer = schedulePlayerTimeout(() => {
+      if (!isCurrentConnection() || connection.connectionState === "connected") return;
+      stopCurrentPlayer();
+      if (requestedMode === "auto") {
+        scheduleWhepRecovery(myGeneration, null, "WebRTC 建立超时");
+      } else {
+        showStatus("WebRTC 建立超过 15 秒，已停止本次连接。请点击“WebRTC / WHEP”重试。", 0);
+      }
+    }, WHEP_CONNECT_TIMEOUT_MS);
+    metadataTimer = schedulePlayerTimeout(() => metadataController.abort(), WHEP_CONNECT_TIMEOUT_MS);
+    refreshWhepStreamMetadata(myGeneration, connection, metadataController.signal, previousCodecFamily)
+      .finally(() => {
+        clearTimeout(metadataTimer);
+        playerTimeouts.delete(metadataTimer);
+      });
+    const suspendSync = () => {
+      if (!isCurrentConnection()) return;
+      resetWhepSyncMonitor();
+    };
+    const resumeSync = () => {
+      if (isCurrentConnection() && !video.paused && !video.seeking && connection.connectionState === "connected") {
+        armWhepSyncMonitor(myGeneration, connection);
+      }
+    };
+    addPlayerVideoListener("pause", () => {
+      if (!isCurrentConnection() || !video.paused) return;
+      whepPlaybackPaused = true;
+      video.autoplay = false;
+      suspendSync();
+    });
+    addPlayerVideoListener("play", () => {
+      if (!isCurrentConnection() || video.paused) return;
+      whepPlaybackPaused = false;
+      video.autoplay = true;
+      resumeSync();
+    });
+    addPlayerVideoListener("seeking", suspendSync);
+    addPlayerVideoListener("seeked", resumeSync);
+
     connection.addEventListener("track", event => {
-      if (myGeneration !== generation) return;
+      if (!isCurrentConnection()) return;
       if (!playbackStream.getTracks().some(track => track.id === event.track.id)) {
         playbackStream.addTrack(event.track);
       }
-      video.srcObject = playbackStream;
+      if (video.srcObject !== playbackStream) video.srcObject = playbackStream;
       video.dataset.whepAudioTracks = String(playbackStream.getAudioTracks().length);
       video.dataset.whepVideoTracks = String(playbackStream.getVideoTracks().length);
       if (event.track.kind === "video") {
@@ -1405,7 +1730,8 @@
         clearTimeout(audioWatchdogTimer);
         audioWatchdogTimer = 0;
       }
-      video.play().catch(() => {
+      if (!whepPlaybackPaused) video.play().catch(() => {
+        if (!isCurrentConnection()) return;
         showStatus(
           `${whepReadyMessage()}\n请点击播放器开始播放。`,
           0
@@ -1416,7 +1742,7 @@
     });
 
     connection.addEventListener("connectionstatechange", () => {
-      if (myGeneration !== generation) return;
+      if (!isCurrentConnection()) return;
       const state = connection.connectionState;
       if (state === "failed") {
         scheduleWhepRecovery(
@@ -1432,6 +1758,7 @@
           WHEP_DISCONNECT_GRACE_MS
         );
       } else if (state === "connected") {
+        clearSetupTimer();
         resetWhepConnectWatchdog();
         clearTimeout(whepReconnectTimer);
         whepReconnectTimer = 0;
@@ -1444,7 +1771,7 @@
     });
 
     connection.addEventListener("iceconnectionstatechange", () => {
-      if (myGeneration !== generation) return;
+      if (!isCurrentConnection()) return;
       if (connection.iceConnectionState === "failed") {
         scheduleWhepRecovery(
           myGeneration,
@@ -1454,28 +1781,32 @@
       }
     });
 
-    let createdSessionUrl = "";
     try {
-      const offer = await connection.createOffer();
+      const offer = await Promise.race([connection.createOffer(), cancelled]);
+      if (!isCurrentConnection()) return;
       const stereoOffer = {
         type: offer.type,
         sdp: ensureOpusStereoFmtp(offer.sdp, false)
       };
-      await connection.setLocalDescription(stereoOffer);
-      await waitForIceGathering(connection, 5000);
-      if (myGeneration !== generation) return;
+      await Promise.race([connection.setLocalDescription(stereoOffer), cancelled]);
+      if (!isCurrentConnection()) return;
+      await Promise.race([waitForIceGathering(connection, 5000, metadataController.signal), cancelled]);
+      if (!isCurrentConnection()) return;
 
       const localSdp = connection.localDescription && connection.localDescription.sdp;
       if (!localSdp) throw new Error("浏览器没有生成 WebRTC SDP");
       const localCodecSupport = sdpSupportsDetectedVideoCodec(localSdp);
       if (localCodecSupport === false) {
+        if (requestedMode === "whep") throw new Error(whepCodecError());
         codecFallbackTried = true;
-        if (requestedMode === "whep") requestedMode = "hls";
         startHls("WebRTC SDP 未声明当前直播编码", WHEP_CODEC_FALLBACK_MESSAGE);
         return;
       }
 
-      const response = await fetch(WHEP_URL, {
+      // Do not abort this stateful POST: a late Location is required to release
+      // a session already created by the backend. Logical cancellation settles
+      // this attempt promptly; the response observer still owns its cleanup.
+      const responseWork = fetch(WHEP_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/sdp",
@@ -1484,16 +1815,27 @@
         body: localSdp,
         cache: "no-store",
         credentials: "same-origin"
+      }).then(response => {
+        createdSessionUrl = publicWhepSessionUrl(response.headers.get("Location"));
+        if (!isCurrentConnection()) releaseCreatedSession();
+        return response;
       });
-      let answerSdp = await response.text();
+      const response = await Promise.race([responseWork, cancelled]);
+      // Capture only this request's session before any asynchronous body work.
+      // A stale 201 must still release its own backend session.
+      if (!isCurrentConnection()) return;
+      let answerSdp = await Promise.race([response.text(), cancelled]);
+      if (!isCurrentConnection()) {
+        releaseCreatedSession();
+        return;
+      }
       if (!response.ok) {
         if (isWhepUnsupportedCodecResponse(response, answerSdp)) {
+          if (requestedMode === "whep") throw new Error(whepCodecError());
           codecFallbackTried = true;
-          if (requestedMode === "whep") requestedMode = "hls";
           startHls("WebRTC 编码协商失败", WHEP_CODEC_FALLBACK_MESSAGE);
           return;
         }
-        describeHttpError(response, answerSdp);
         throw new Error(publicWhepHttpError(response));
       }
       // MediaMTX can return opus/48000/2 without explicit stereo fmtp.
@@ -1519,27 +1861,22 @@
         setDetectedAudioCodec("opus");
       }
 
-      const locationHeader = response.headers.get("Location");
-      createdSessionUrl = publicWhepSessionUrl(locationHeader);
-      if (myGeneration !== generation) {
-        deleteWhepSession(createdSessionUrl);
-        return;
-      }
       whepSessionUrl = createdSessionUrl;
       armWhepSessionKeepalive(createdSessionUrl, myGeneration);
-      await connection.setRemoteDescription({
+      await Promise.race([connection.setRemoteDescription({
         type: "answer",
         sdp: answerSdp
-      });
+      }), cancelled]);
+      if (!isCurrentConnection()) return;
       if (connection.connectionState !== "connected") {
         armWhepConnectWatchdog(myGeneration, connection);
       }
     } catch (error) {
-      if (createdSessionUrl) {
-        if (whepSessionUrl === createdSessionUrl) whepSessionUrl = "";
-        deleteWhepSession(createdSessionUrl);
-      }
-      if (myGeneration !== generation) return;
+      releaseCreatedSession();
+      if (!isCurrentConnection()) return;
+      cleanupAttempt();
+      if (whepAttemptCleanup === cleanupAttempt) whepAttemptCleanup = null;
+      resetWhepSessionKeepalive();
       const message = error && error.message ? error.message : String(error);
       showStatus(
         `WebRTC / WHEP 播放失败：${message}\n可点击“LL-HLS”继续诊断。`,
@@ -1548,7 +1885,9 @@
       try {
         connection.close();
       } catch (_) {}
-      if (peerConnection === connection) peerConnection = null;
+      if (requestedMode === "auto" && peerConnection === connection) {
+        scheduleWhepRecovery(myGeneration, connection, message);
+      } else if (peerConnection === connection) peerConnection = null;
     }
   }
 
@@ -1644,11 +1983,17 @@
     }
 
     const instance = new Hls({
+      // Use the pinned library's controller extension point; retain its
+      // recovery logic while preventing stale append deadlines from aborting
+      // an idle buffer or a newer operation. No global MSE prototype changes.
+      ...(Hls.DefaultConfig && Hls.DefaultConfig.bufferController ? {
+        bufferController: HLS_WEAK_POLICY.withAppendOwnership(Hls.DefaultConfig.bufferController)
+      } : {}),
       lowLatencyMode: true,
 
-      // Keep the normal target close to 5 seconds, but prefer already-buffered
+      // Keep the normal target at three two-second segments; prefer buffered
       // positions when HLS.js has to resync after a stall.
-      liveSyncDuration: TARGET_BUFFER_SECONDS,
+      liveSyncDuration: HLS_NORMAL_TARGET_LATENCY_SECONDS,
       liveMaxLatencyDuration: 18,
       liveSyncMode: "buffered",
       startOnSegmentBoundary: true,
@@ -1686,6 +2031,13 @@
           errorRetry: { maxNumRetry: 3, retryDelayMs: 700, maxRetryDelayMs: 6000, backoff: "exponential" }
         }
       },
+
+      // hls.js 1.7 can bound a SourceBuffer append that never completes and
+      // detect a live playlist that has stopped advancing. Its append timeout
+      // is a minimum; hls.js automatically raises it for long target durations
+      // or an already-deep active buffer.
+      appendTimeout: HLS_APPEND_TIMEOUT_MS,
+      liveMaxUnchangedPlaylistRefresh: HLS_MAX_UNCHANGED_PLAYLIST_REFRESH,
 
       // MediaMTX LL-HLS uses one-second CMAF parts. Tolerate small timestamp
       // gaps introduced by encoder clocks and browser remuxing.
@@ -1762,7 +2114,8 @@
 
       showStatus(
         `${compatibilityNotice ? `${compatibilityNotice}\n` : ""}` +
-        `LL-HLS 已就绪 · ${detectedCodecName} · 目标缓冲约 ${hlsWeakNetworkMode ? HLS_WEAK_TARGET_BUFFER_SECONDS : TARGET_BUFFER_SECONDS} 秒`,
+        (hlsWeakNetworkMode ? hlsWeakBuildingMessage() :
+          `LL-HLS 已就绪 · ${detectedCodecName} · 目标直播延迟约 ${HLS_NORMAL_TARGET_LATENCY_SECONDS} 秒`),
         compatibilityNotice ? 6000 : 3500
       );
       video.play().catch(() => {
@@ -1774,9 +2127,37 @@
       });
     });
 
-    instance.on(Hls.Events.FRAG_LOADED, () => {
-      if (myGeneration !== generation) return;
+    addPlayerVideoListener("seeked", () => {
+      if (myGeneration === generation) updateHlsWeakBufferReadiness(instance);
+    });
+
+    instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+      if (myGeneration !== generation || instance !== hls) return;
       hlsConsecutiveNetworkErrors = 0;
+      // Public stats belong to this request: use Part.stats for a part and
+      // Fragment.stats only for a whole-segment event (part === null).
+      // Normal playback at 6s often loads already-complete segments, so both
+      // are needed to establish a healthy baseline. Discount one media-part
+      // duration from part TTFB to conservatively exclude generation wait.
+      const part = data && data.part;
+      const segment = part || (data && data.frag);
+      const stats = segment && segment.stats;
+      const loading = stats && stats.loading;
+      if (hlsWeakNetworkMode || !data || !data.frag || data.frag.type !== "main" ||
+        data.frag.sn === "initSegment" || !segment || !Number.isFinite(segment.duration) ||
+        !(segment.duration > 0) || !loading || stats.aborted || stats.retry > 0 ||
+        !(stats.loaded > 0) || !Number.isFinite(loading.start) ||
+        !Number.isFinite(loading.first) || !Number.isFinite(loading.end) ||
+        loading.first < loading.start || loading.end < loading.first) return;
+      const weakClass = HLS_WEAK_POLICY.sampleRequestOverhead(hlsWeakPolicyState, {
+        now: Date.now(), requestOverheadMs: Math.max(0,
+          loading.first - loading.start - (part ? part.duration * 1000 : 0)),
+        bandwidthRatio: HLS_WEAK_POLICY.bandwidthRatio(instance.bandwidthEstimate,
+          Number(lastStreamMetadata && lastStreamMetadata.bandwidth)),
+        bufferAhead: bufferedAheadSeconds(video), paused: video.paused,
+        seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+      });
+      if (weakClass) applyHlsNetworkProfile(instance, true, "持续高请求开销", "", weakClass);
     });
 
 
@@ -1805,6 +2186,54 @@
       const responseCode = httpStatus
         ? ` / HTTP ${httpStatus}`
         : "";
+      const fatalNetworkError = HLS_WEAK_POLICY.isFatalNetworkError(
+        data.fatal,
+        data.type,
+        Hls.ErrorTypes.NETWORK_ERROR
+      );
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        // Request errors invalidate a weak-to-normal quiet window. A timed-out
+        // playlist with a draining live buffer also warrants early protection;
+        // other non-fatal errors keep the existing classification path.
+        // Successful fragments reset only the consecutive retry counter; the
+        // timestamp remains until the real network-health quiet window passes.
+        HLS_WEAK_POLICY.markNetworkError(hlsWeakPolicyState, Date.now());
+        hlsConsecutiveNetworkErrors += 1;
+        if (!hlsWeakNetworkMode && HLS_WEAK_POLICY.shouldProtectPlaylistBuffer({
+          details, fatal: data.fatal, bufferAhead: bufferedAheadSeconds(video),
+          playbackAgeMs: hlsNetworkPlaybackStartedAt ? Date.now() - hlsNetworkPlaybackStartedAt : 0,
+          paused: video.paused,
+          seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+        })) {
+          // Retain the current MSE buffers and let hls.js finish its own retry.
+          // The existing bounded safe-point operation supplies reserve before
+          // starvation; it runs at most once in this weak episode.
+          applyHlsNetworkProfile(instance, true, "直播清单请求超时且安全缓冲不足");
+        }
+      }
+
+      if (
+        (Hls.ErrorDetails && details === Hls.ErrorDetails.PLAYLIST_UNCHANGED_ERROR) ||
+        details === "playlistUnchangedError"
+      ) {
+        showStatus("直播清单持续未更新，正在重新同步最新媒体…", 0);
+        queueHlsNetworkRecovery("reload");
+        schedulePlayerTimeout(() => {
+          runPendingHlsNetworkRecovery(myGeneration, instance);
+        }, 250);
+        return;
+      }
+
+      if (
+        (Hls.ErrorDetails && details === Hls.ErrorDetails.MEDIA_SOURCE_REQUIRES_RESET) ||
+        details === "mediaSourceRequiresReset"
+      ) {
+        // hls.js 1.7 marks this condition with ResetMediaSource and performs
+        // its own detach/re-attach recovery. Avoid racing it with a second
+        // recoverMediaError() call from the generic fatal-media branch below.
+        showStatus("浏览器媒体缓冲需要重建，正在自动恢复播放…", 5000);
+        return;
+      }
 
       if (!data.fatal) {
         // HLS.js has already recovered from BUFFER_SEEK_OVER_HOLE by seeking
@@ -1832,14 +2261,25 @@
           return;
         }
 
+        if (
+          (Hls.ErrorDetails && details === Hls.ErrorDetails.BUFFER_APPEND_NO_PROGRESS) ||
+          details === "bufferAppendNoProgress"
+        ) {
+          const attempts = Number(data.appendsWithoutProgress || 0);
+          showStatus(
+            `浏览器缓冲写入未产生进度${attempts > 0 ? `（连续 ${attempts} 次）` : ""}，正在跳过异常片段…`,
+            5000
+          );
+          return;
+        }
+
         if (/buffer|codec|media/i.test(details)) {
           showStatus(`HLS 警告：${details}${responseCode}`, 5000);
         }
         return;
       }
 
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        hlsConsecutiveNetworkErrors += 1;
+      if (fatalNetworkError) {
         applyHlsNetworkProfile(instance, true, "连续网络请求失败");
         if (httpStatus >= 500) {
           hlsServerFailureCount += 1;
@@ -1870,7 +2310,7 @@
           0
         );
         queueHlsNetworkRecovery(/manifest|level/i.test(details) ? "reload" : "start");
-        setTimeout(() => {
+        schedulePlayerTimeout(() => {
           runPendingHlsNetworkRecovery(myGeneration, instance);
         }, retryDelay);
         return;
@@ -1898,35 +2338,35 @@
       showStatus(`HLS 不可恢复错误：${data.type} / ${details}${responseCode}`, 0);
     });
 
-    video.addEventListener("waiting", () => {
+    addPlayerVideoListener("waiting", () => {
       if (myGeneration !== generation || activeMode !== "hls") return;
       markHlsStall();
     });
 
-    video.addEventListener("stalled", () => {
+    addPlayerVideoListener("stalled", () => {
       if (myGeneration !== generation || activeMode !== "hls") return;
       markHlsStall();
     });
 
-    video.addEventListener("playing", () => {
+    addPlayerVideoListener("playing", () => {
       if (
         myGeneration !== generation ||
         activeMode !== "hls" ||
-        hls !== instance ||
-        !hlsStallStartedAt
+        hls !== instance
       ) {
         return;
       }
+      if (!hlsStallStartedAt) return;
       maybeResyncHlsAfterStall(myGeneration, instance);
     });
 
-    video.addEventListener("loadeddata", () => {
+    addPlayerVideoListener("loadeddata", () => {
       if (myGeneration !== generation) return;
       clearTimeout(watchdogTimer);
       watchdogTimer = 0;
     }, { once: true });
 
-    video.addEventListener("error", () => {
+    addPlayerVideoListener("error", () => {
       if (myGeneration !== generation || activeMode !== "hls") return;
       showStatus(
         detectedCodec ? hlsCodecError() : "浏览器视频解码失败，尚未识别到编码。",
@@ -1965,9 +2405,14 @@
     setDetectedAudioCodec("");
     setModeButtons();
     showStatus("正在检测直播编码…", 0);
+    if (window.RTCPeerConnection) {
+      await startWhep("自动模式优先 WebRTC");
+      return;
+    }
     try {
       const metadata = await inspectManifest();
       if (myGeneration !== generation || requestedMode !== "auto") return;
+      applyManifestMetadata(metadata);
       hlsServerFailureCount = 0;
       hlsLastHttpStatus = 0;
       const capability = await detectCodecCapability(metadata);
@@ -1975,21 +2420,8 @@
       hlsOfflineRetryAttempts = 0;
 
       const hlsSupport = effectiveHlsSupport(capability);
-      const whepSupport = effectiveWhepSupport(capability);
-      if (hlsSupport === false && whepSupport === false) {
+      if (hlsSupport === false) {
         showStatus(unsupportedCodecMessage(capability), 0);
-        return;
-      }
-
-      if (hlsSupport === false && whepSupport !== false) {
-        codecFallbackTried = true;
-        await startWhep(`检测到 ${codecName(metadata.videoCodec)}，LL-HLS/MSE 不支持`);
-        return;
-      }
-
-      if (isWhepPreferredCodec(metadata.videoCodec) && hlsSupport !== true && whepSupport === true) {
-        codecFallbackTried = true;
-        await startWhep(`检测到 ${codecName(metadata.videoCodec)}，WebRTC 接收能力更明确`);
         return;
       }
 
@@ -2006,6 +2438,7 @@
           hlsServerFailureCount += 1;
           hlsLastHttpStatus = httpStatus;
           if (
+            window.RTCPeerConnection &&
             !codecFallbackTried &&
             hlsServerFailureCount >= HLS_SERVER_FAILURE_FALLBACK_COUNT
           ) {
@@ -2065,6 +2498,7 @@
 
   window.addEventListener("offline", () => {
     if (activeMode === "hls") {
+      HLS_WEAK_POLICY.markOffline(hlsWeakPolicyState);
       showStatus("网络连接已中断，播放器将保留现有缓冲并等待恢复…", 0);
     } else if (activeMode === "whep") {
       showStatus("网络连接已中断，WebRTC 将在网络恢复后自动重连…", 0);
@@ -2072,8 +2506,17 @@
   });
 
   window.addEventListener("online", () => {
-    if (activeMode === "hls" && hls) {
-      applyHlsNetworkProfile(hls, true, "网络刚恢复");
+    if (
+      activeMode === "hls" &&
+      hls &&
+      HLS_WEAK_POLICY.consumeOnlineAfterOffline(hlsWeakPolicyState)
+    ) {
+      if (hlsWeakNetworkMode) {
+        // A previous weak safe-point retry window may have expired offline.
+        scheduleHlsWeakNetworkSafePoint(hls);
+      } else {
+        applyHlsNetworkProfile(hls, true, "网络刚恢复");
+      }
       if (!runPendingHlsNetworkRecovery(generation, hls)) {
         try { hls.startLoad(-1); } catch (_) {}
       }
@@ -2118,8 +2561,27 @@
     get network() {
       return {
         hlsWeakNetworkMode,
+        hlsWeakNetworkClass: hlsWeakPolicyState.weakNetworkClass,
+        hlsWeakBufferReady: hlsWeakPolicyState.weakBufferReady,
+        hlsBufferSlope: hlsWeakPolicyState.bufferSlope,
+        hlsRequestOverheadMs: hlsWeakPolicyState.requestOverheadMs,
+        hlsRequestOverheadBaselineMs: hlsWeakPolicyState.requestOverheadBaselineMs,
         hlsLowBufferSamples,
-        hlsHealthySamples,
+        hlsLowBandwidthSamples: hlsWeakPolicyState.lowBandwidthSamples,
+        hlsHealthySamples: hlsWeakPolicyState.fastRecoverySamples,
+        hlsFastRecoverySamples: hlsWeakPolicyState.fastRecoverySamples,
+        hlsStableRecoverySamples: hlsWeakPolicyState.stableRecoverySamples,
+        hlsLastWeakSafePointAt,
+        hlsNetworkPlaybackStartedAt,
+        hlsRecentStallIncidents: hlsWeakPolicyState.stallIncidents.length,
+        hlsStallEpisodeActive: hlsWeakPolicyState.stallEpisodeActive,
+        hlsStallEpisodeStartedAt: hlsWeakPolicyState.stallEpisodeStartedAt,
+        hlsLastNetworkErrorAt: hlsWeakPolicyState.lastNetworkErrorAt,
+        hlsLastBandwidthRatio: hlsWeakPolicyState.lastBandwidthRatio,
+        hlsWeakEnterTimestamp: hlsWeakPolicyState.weakEnterTimestamp,
+        hlsWeakTriggerReason: hlsWeakPolicyState.weakTriggerReason,
+        hlsWeakRecoveryPath: hlsWeakPolicyState.weakRecoveryPath,
+        hlsWasOffline: hlsWeakPolicyState.wasOffline,
         hlsConsecutiveNetworkErrors,
         hlsOfflineRetryAttempts,
         hlsOfflineRetryScheduled: Boolean(hlsOfflineRetryTimer),

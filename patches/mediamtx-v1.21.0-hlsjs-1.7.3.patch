@@ -1,0 +1,12 @@
+diff --git a/internal/servers/hls/hlsjsdownloader/VERSION b/internal/servers/hls/hlsjsdownloader/VERSION
+--- a/internal/servers/hls/hlsjsdownloader/VERSION
++++ b/internal/servers/hls/hlsjsdownloader/VERSION
+@@ -1 +1 @@
+-v1.7.2
++v1.7.3
+diff --git a/internal/servers/hls/hlsjsdownloader/HASH b/internal/servers/hls/hlsjsdownloader/HASH
+--- a/internal/servers/hls/hlsjsdownloader/HASH
++++ b/internal/servers/hls/hlsjsdownloader/HASH
+@@ -1 +1 @@
+-6bdb7dcdcf22b23e29d5b324d866f5a589120a178f304aae1f793ead0af9666f
++abbda85f3e9b8325fc6b8dbf4fa612ea87144ebad93c2150594e64aad58ec529

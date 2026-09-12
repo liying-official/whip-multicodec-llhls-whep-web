@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+STATUS_RESULT=0
 PUBLIC_DOMAIN=
 PUBLIC_HTTPS_PORT=443
 WHIP_IP=
@@ -76,12 +77,22 @@ fi
 [ -n "$INGEST_INTERFACE" ] || INGEST_INTERFACE='未检测'
 [ -n "$INGEST_ALLOW_CIDRS" ] || INGEST_ALLOW_CIDRS='未检测（发布应失败关闭）'
 case "$(uname -m)" in
-  x86_64|amd64) HELPER="$ROOT/bin/helper_linux_amd64" ;;
-  aarch64|arm64) HELPER="$ROOT/bin/helper_linux_arm64" ;;
+  x86_64|amd64)
+    HELPER="$ROOT/bin/helper_linux_amd64"
+    MEDIAMTX="$ROOT/bin/mediamtx_linux_amd64"
+    CADDY="$ROOT/bin/caddy_linux_amd64"
+    ;;
+  aarch64|arm64)
+    HELPER="$ROOT/bin/helper_linux_arm64"
+    MEDIAMTX="$ROOT/bin/mediamtx_linux_arm64"
+    CADDY="$ROOT/bin/caddy_linux_arm64"
+    ;;
   *) echo "unsupported architecture"; exit 1 ;;
 esac
 show_pid() {
   name=$1; file=$2; expected=$3; state="STOPPED"
+  healthy=0
+  required_arg=${4:-}
   if [ -f "$file" ]; then
     pid=$(cat "$file" 2>/dev/null || true)
     executable=
@@ -89,27 +100,41 @@ show_pid() {
       ""|*[!0-9]*) ;;
       *) [ -r "/proc/$pid/cmdline" ] && executable=$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '1p') ;;
     esac
-    if [ "$executable" = "$expected" ] && kill -0 "$pid" 2>/dev/null; then
+    managed_arg=
+    if [ -r "/proc/$pid/cmdline" ]; then
+      managed_arg=$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '2p')
+    fi
+    if [ "$executable" = "$expected" ] \
+       && { [ -z "$required_arg" ] || [ "$managed_arg" = "$required_arg" ]; } \
+       && kill -0 "$pid" 2>/dev/null; then
       state="RUNNING (PID $pid)"
+      healthy=1
     elif [ -n "$pid" ]; then
       state="STALE PID ($pid)"
     fi
   fi
   printf '%-14s: %s\n' "$name" "$state"
+  [ "$healthy" -eq 1 ] || STATUS_RESULT=1
 }
 show_tcp() {
   name=$1; addr=$2
-  if "$HELPER" tcp --addr "$addr" --timeout 500ms >/dev/null 2>&1; then s=LISTENING; else s='NOT LISTENING'; fi
+  if "$HELPER" tcp --addr "$addr" --timeout 500ms >/dev/null 2>&1; then
+    s=LISTENING
+  else
+    s='NOT LISTENING'
+    STATUS_RESULT=1
+  fi
   printf '%-18s: %s\n' "$name" "$s"
 }
-show_pid MTX-Supervisor "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh"
-show_pid MediaMTX "$ROOT/runtime/mediamtx.pid" "$ROOT/bin/mediamtx"
+show_pid MTX-Supervisor "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh" "$ROOT/mediamtx-supervisor.sh"
+show_pid MediaMTX "$ROOT/runtime/mediamtx.pid" "$MEDIAMTX"
 show_pid Gateway "$ROOT/runtime/gateway.pid" "$HELPER"
-show_pid Caddy-HTTPS "$ROOT/runtime/caddy.pid" "$ROOT/bin/caddy"
+show_pid Caddy-HTTPS "$ROOT/runtime/caddy.pid" "$CADDY"
 if command -v systemctl >/dev/null 2>&1 \
    && systemctl list-unit-files obs-whip-live.service >/dev/null 2>&1; then
   systemd_state=$(systemctl is-active obs-whip-live.service 2>/dev/null || true)
   printf '%-18s: %s\n' 'systemd unit' "${systemd_state:-unknown}"
+  [ "$systemd_state" = active ] || STATUS_RESULT=1
 fi
 show_tcp 'WHIP 8889/TCP' "$WHIP_IP:8889"
 show_tcp 'RTMP 1935/TCP' "$WHIP_IP:1935"
@@ -119,11 +144,21 @@ show_tcp 'Gateway 8080/TCP' '127.0.0.1:8080'
 show_tcp 'Metrics 9998/TCP' '127.0.0.1:9998'
 show_tcp 'Public 443/TCP' '127.0.0.1:443'
 if command -v ss >/dev/null 2>&1; then
-  if ss -H -lun 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:443[[:space:]]'; then s=LISTENING; else s='NOT LISTENING'; fi
+  if ss -H -lun 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:443[[:space:]]'; then
+    s=LISTENING
+  else
+    s='NOT LISTENING'
+    STATUS_RESULT=1
+  fi
   printf '%-18s: %s\n' 'Public 443/UDP' "$s"
 fi
 if command -v ss >/dev/null 2>&1; then
-  if ss -H -lun 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:8189[[:space:]]'; then s=LISTENING; else s='NOT LISTENING'; fi
+  if ss -H -lun 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:8189[[:space:]]'; then
+    s=LISTENING
+  else
+    s='NOT LISTENING'
+    STATUS_RESULT=1
+  fi
   printf '%-18s: %s\n' 'WebRTC 8189/UDP' "$s"
 fi
 
@@ -132,6 +167,7 @@ if [ "$PUBLIC_HTTPS_PORT_VALID" -eq 1 ]; then
   printf '%-18s: %s\n' 'External mapping' "TCP/UDP $PUBLIC_HTTPS_PORT -> local 443"
 else
   printf '%-18s: %s\n' 'External mapping' "INVALID PUBLIC_HTTPS_PORT"
+  STATUS_RESULT=1
 fi
 printf '%-18s: %s\n' 'Ingest interface' "$INGEST_INTERFACE ($WHIP_IP)"
 printf '%-18s: %s\n' 'Ingest allow CIDRs' "$INGEST_ALLOW_CIDRS"
@@ -142,7 +178,10 @@ if [ -n "${PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
     printf '%-18s: %s\n' 'WebRTC DDNS' "PASS ($PUBLIC_HOST -> $status_host_a; AAAA none)"
   elif [ -n "$status_host_aaaa" ]; then
     printf '%-18s: %s\n' 'WebRTC DDNS' "FAIL ($PUBLIC_HOST has AAAA: $status_host_aaaa)"
+    STATUS_RESULT=1
   else
     printf '%-18s: %s\n' 'WebRTC DDNS' "FAIL ($PUBLIC_HOST A unresolved)"
+    STATUS_RESULT=1
   fi
 fi
+exit "$STATUS_RESULT"

@@ -4,7 +4,21 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 077
 
+case "$0" in
+  /*) START_SCRIPT_INPUT=$0 ;;
+  *) START_SCRIPT_INPUT=$PWD/$0 ;;
+esac
+if ! START_SCRIPT_LEXICAL=$(realpath -s -m -- "$START_SCRIPT_INPUT" 2>/dev/null); then
+  echo "安全拒绝：无法规范化 start.sh 路径。" >&2
+  exit 1
+fi
+ROOT_LEXICAL=$(dirname -- "$START_SCRIPT_LEXICAL")
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+if [ "$ROOT_LEXICAL" != "$ROOT" ] || [ "$START_SCRIPT_LEXICAL" != "$ROOT/start.sh" ] \
+   || [ -L "$START_SCRIPT_LEXICAL" ]; then
+  echo "安全拒绝：必须从不含符号链接的项目真实路径直接执行 start.sh。" >&2
+  exit 1
+fi
 cd "$ROOT"
 
 START_MODE=interactive
@@ -51,7 +65,7 @@ secure_owned_path() {
   secure_perm=$((0$secure_mode))
   if [ "$secure_uid" -ne 0 ] || [ $((secure_perm & 0022)) -ne 0 ]; then
     echo "安全拒绝：$secure_path 必须由 root 所有且不可被组/其他用户写入。" >&2
-    echo "建议复制到 /opt/obs-whip-live-r33 后执行 chown -R root:root，并移除 group/other 写权限。" >&2
+    echo "建议复制到 /opt/obs-whip-live 后执行 chown -R root:root，并移除 group/other 写权限。" >&2
     exit 1
   fi
   case "$secure_kind" in
@@ -77,23 +91,21 @@ check_parent_chain() {
 
 check_parent_chain
 secure_owned_path "$ROOT" d
-for secure_item in \
+for secure_dir in \
+  "$ROOT/bin" "$ROOT/web" "$ROOT/src" "$ROOT/third_party" "$ROOT/lib"; do
+  secure_owned_path "$secure_dir" d
+done
+for secure_file in \
   "$ROOT/start.sh" "$ROOT/stop.sh" "$ROOT/status.sh" "$ROOT/diagnose.sh" \
   "$ROOT/mediamtx-supervisor.sh" "$ROOT/service-manager.sh" \
   "$ROOT/show-credentials.sh" "$ROOT/install-systemd.sh" "$ROOT/config.env" \
   "$ROOT/Caddyfile.template" "$ROOT/mediamtx.template.yml" \
-  "$ROOT/bin" "$ROOT/web" "$ROOT/src" "$ROOT/third_party" \
-  "$ROOT/web/index.html" "$ROOT/web/app.js" "$ROOT/web/app.css" "$ROOT/web/hls.min.js" \
+  "$ROOT/web/index.html" "$ROOT/web/app.js" "$ROOT/web/app.css" \
+  "$ROOT/web/hls.min.js" "$ROOT/web/hls-weak-network-policy.js" \
   "$ROOT/third_party/HLSJS-LICENSE.txt" "$ROOT/third_party/HLSJS-VERSION.txt" \
-  "$ROOT/src/helper.go" "$ROOT/src/helper_test.go"; do
-  secure_owned_path "$secure_item" x
+  "$ROOT/src/helper.go" "$ROOT/src/helper_test.go" "$ROOT/lib/resolve-public-host.sh"; do
+  secure_owned_path "$secure_file" f
 done
-# The per-architecture Caddy file is required above; bin/caddy is its generated
-# runtime copy and is optional before first start. If present, it must already
-# be inside the same root-owned trust boundary.
-secure_optional="$ROOT/bin/caddy"
-[ ! -e "$secure_optional" ] || secure_owned_path "$secure_optional" f
-
 PUBLIC_DOMAIN=
 PUBLIC_HTTPS_PORT=443
 TLS_CERT=certs/fullchain.pem
@@ -149,18 +161,23 @@ case "$(uname -m)" in
 esac
 MEDIAMTX_BUNDLED="$ROOT/bin/mediamtx_linux_$ARCH"
 CADDY_BUNDLED="$ROOT/bin/caddy_linux_$ARCH"
+MEDIAMTX="$MEDIAMTX_BUNDLED"
+CADDY="$CADDY_BUNDLED"
 secure_owned_path "$HELPER" f
 secure_owned_path "$MEDIAMTX_BUNDLED" f
 secure_owned_path "$CADDY_BUNDLED" f
-[ -f "$HELPER" ] || {
-  echo "错误：缺少当前架构的启动辅助程序：$HELPER" >&2
+[ -x "$HELPER" ] || {
+  echo "错误：当前架构的启动辅助程序缺失或不可执行：$HELPER" >&2
   exit 1
 }
-[ -f "$CADDY_BUNDLED" ] || {
-  echo "错误：缺少当前架构的安全基线 Caddy：$CADDY_BUNDLED" >&2
+[ -x "$MEDIAMTX" ] || {
+  echo "错误：当前架构的修补版 MediaMTX 缺失或不可执行：$MEDIAMTX" >&2
   exit 1
 }
-chmod +x "$HELPER"
+[ -x "$CADDY" ] || {
+  echo "错误：当前架构的安全基线 Caddy 缺失或不可执行：$CADDY" >&2
+  exit 1
+}
 
 if [ -r /etc/os-release ]; then
   # The file is supplied by Debian, not by this release tree.
@@ -246,28 +263,31 @@ if ! command -v getent >/dev/null 2>&1; then
   echo "错误：缺少 getent，无法在启动前验证 PUBLIC_HOST 的 IPv4 DNS 解析。" >&2
   exit 1
 fi
-PUBLIC_HOST_IPV4S=$(getent ahostsv4 "$PUBLIC_HOST" 2>/dev/null | awk '
-  NF > 0 && !seen[$1]++ {
-    if (out != "") out = out ","
-    out = out $1
-  }
-  END { print out }
-' || true)
-if [ -z "$PUBLIC_HOST_IPV4S" ]; then
-  echo "错误：PUBLIC_HOST=$PUBLIC_HOST 当前无法解析出 IPv4 A 记录；请先修复 DNS/DDNS 后再启动。" >&2
+command -v timeout >/dev/null 2>&1 || { echo "错误：缺少 coreutils timeout。" >&2; exit 1; }
+# One elapsed-time budget covers A retries AND AAAA verification, including
+# getent's own resolver waits. GNU timeout also terminates its process group.
+if ! public_dns_result=$(timeout --kill-after=1s 30s /bin/sh "$ROOT/lib/resolve-public-host.sh" "$PUBLIC_HOST" "$START_MODE"); then
+  echo "错误：PUBLIC_HOST=$PUBLIC_HOST DNS 查询失败或超过 30 秒总时限；未通过启动验收。" >&2
   exit 1
 fi
-PUBLIC_HOST_IPV6S=$(getent ahostsv6 "$PUBLIC_HOST" 2>/dev/null | awk '
-  NF > 0 && $1 ~ /:/ && $1 !~ /^::ffff:/ && !seen[$1]++ {
-    if (out != "") out = out ","
-    out = out $1
-  }
-  END { print out }
-' || true)
+PUBLIC_HOST_IPV4S=$(printf '%s\n' "$public_dns_result" | sed -n '1p')
+PUBLIC_HOST_IPV6S=$(printf '%s\n' "$public_dns_result" | sed -n '2p')
 if [ -n "$PUBLIC_HOST_IPV6S" ]; then
   echo "错误：PUBLIC_HOST=$PUBLIC_HOST 同时存在 IPv6 AAAA 解析：$PUBLIC_HOST_IPV6S" >&2
   echo "本包为 WebRTC ICE 强制 IPv4 路径，PUBLIC_HOST 必须使用仅有 A 记录、没有 AAAA 的 DDNS 域名。" >&2
   echo "如公网网站需要 IPv6，请为 WebRTC 单独使用 A-only 子域名（例如 webrtc.example.com）。" >&2
+  exit 1
+fi
+
+# Freeze and validate the exact public IPv4 set used by this service instance.
+# MediaMTX may resolve the DDNS name again while creating ICE candidates, but
+# the public WHEP Gateway only releases candidates from this startup snapshot.
+# Private, shared, loopback, link-local, documentation, multicast and reserved
+# ranges fail closed here instead of becoming browser-visible ICE addresses.
+if ! PUBLIC_HOST_IPV4S=$(
+  "$HELPER" public-ips --value "$PUBLIC_HOST_IPV4S"
+); then
+  echo "错误：PUBLIC_HOST=$PUBLIC_HOST 的 A 记录不是可用于公网 ICE 的 IPv4 地址。" >&2
   exit 1
 fi
 
@@ -362,13 +382,58 @@ for v in "$PUBLIC_DOMAIN" "$PUBLIC_HTTPS_PORT" "$PUBLIC_HOST" "$TLS_CERT_ABS" "$
   fi
 done
 
+# The private key can live outside the package in an ACME-managed directory,
+# including behind root-managed symlinks. Resolve the final target, then reject
+# keys that a non-root user can read or replace. Caddy runs
+# inside the service sandbox as root, so accepting a 0644 key here would expose
+# the site's TLS identity to every local account even though startup succeeds.
+check_tls_private_key() {
+  key_input=$1
+  key_real=$(readlink -f -- "$key_input" 2>/dev/null || true)
+  if [ -z "$key_real" ] || [ ! -f "$key_real" ]; then
+    echo "安全拒绝：TLS 私钥不存在或不是普通文件：$key_input" >&2
+    exit 1
+  fi
+  key_uid=$(stat -c %u -- "$key_real")
+  key_mode=$(stat -c %a -- "$key_real")
+  key_perm=$((0$key_mode))
+  if [ "$key_uid" -ne 0 ] || [ $((key_perm & 0077)) -ne 0 ]; then
+    echo "安全拒绝：TLS 私钥目标必须由 root 所有且权限不得向组/其他用户开放：$key_real" >&2
+    echo "请执行 chown root:root 并将私钥权限设置为 0600。" >&2
+    exit 1
+  fi
+
+  check_key_parent_chain() {
+    key_parent=$1
+    while [ "$key_parent" != / ]; do
+      [ -d "$key_parent" ] || {
+        echo "安全拒绝：TLS 私钥父路径不是目录：$key_parent" >&2
+        exit 1
+      }
+      parent_uid=$(stat -c %u -- "$key_parent")
+      parent_mode=$(stat -c %a -- "$key_parent")
+      parent_perm=$((0$parent_mode))
+      if [ "$parent_uid" -ne 0 ] || [ $((parent_perm & 0022)) -ne 0 ]; then
+        echo "安全拒绝：TLS 私钥父目录可被非 root 用户替换：$key_parent" >&2
+        exit 1
+      fi
+      key_parent=$(dirname -- "$key_parent")
+    done
+  }
+  # Check both the configured path and its resolved target. This closes the
+  # symlink-swap race in which a secure target is referenced through /tmp or
+  # another directory writable by an unprivileged local user.
+  check_key_parent_chain "$(dirname -- "$key_input")"
+  check_key_parent_chain "$(dirname -- "$key_real")"
+}
+check_tls_private_key "$TLS_KEY_ABS"
+
 escape_sed_replacement() {
   printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
 }
 
-mkdir -p "$ROOT/bin" "$ROOT/web" "$ROOT/logs" "$ROOT/runtime" "$ROOT/third_party" "$ROOT/certs"
-chmod 755 "$ROOT/bin" "$ROOT/web" "$ROOT/third_party"
-chmod 700 "$ROOT/logs" "$ROOT/runtime" "$ROOT/certs"
+mkdir -p "$ROOT/logs" "$ROOT/runtime"
+chmod 700 "$ROOT/logs" "$ROOT/runtime"
 
 if ! INGEST_CIDRS_JSON=$("$HELPER" private-cidrs --value "$INGEST_ALLOW_CIDRS"); then
   echo "错误：自动生成的发布范围未通过 RFC1918 安全校验。" >&2
@@ -387,34 +452,59 @@ INGEST_STATE_TMP="$ROOT/runtime/ingest.detected.tmp.$$"
 chmod 600 "$INGEST_STATE_TMP"
 mv -f "$INGEST_STATE_TMP" "$ROOT/runtime/ingest.detected"
 
-# MediaMTX v1.19.3-r8 是本包随附的修补构建；不能下载官方二进制替换，
+# MediaMTX 是本包随附的修补构建；不能下载官方二进制替换，
 # 否则 AOM AV1 RTMP 空 sequence-start 和 WHIP OBU/HLS 兼容修复都会丢失。
-[ -f "$MEDIAMTX_BUNDLED" ] || {
-  echo "错误：缺少当前架构的修补版 MediaMTX：$MEDIAMTX_BUNDLED" >&2
-  exit 1
-}
 
-# hls.js v1.6.16 与许可证/完整性标记固定随包交付。运行时不访问 npm，
+# hls.js v1.7.3 与许可证/完整性标记固定随包交付。运行时不访问 npm，
 # 避免新部署在外网不可用时出现 systemd active 但媒体栈仍等待下载。
-grep -Fxq 'hls.js v1.6.16' "$ROOT/third_party/HLSJS-VERSION.txt" || {
+HLSJS_EXPECTED_SHA256=a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e
+grep -Fxq '  hls.js v1.7.3' "$ROOT/third_party/HLSJS-VERSION.txt" || {
   echo "错误：随包 hls.js 版本标记无效。" >&2
   exit 1
 }
-chmod +x "$MEDIAMTX_BUNDLED" "$CADDY_BUNDLED"
-
+grep -Fxq "  $HLSJS_EXPECTED_SHA256" "$ROOT/third_party/HLSJS-VERSION.txt" || {
+  echo "错误：随包 hls.js SHA-256 标记无效。" >&2
+  exit 1
+}
+if ! HLSJS_ACTUAL_SHA256=$(sha256sum -- "$ROOT/web/hls.min.js"); then
+  echo "错误：无法计算随包 hls.js 的 SHA-256。" >&2
+  exit 1
+fi
+HLSJS_ACTUAL_SHA256=${HLSJS_ACTUAL_SHA256%% *}
+if [ "$HLSJS_ACTUAL_SHA256" != "$HLSJS_EXPECTED_SHA256" ]; then
+  echo "错误：随包 hls.js 完整性校验失败。" >&2
+  exit 1
+fi
 # 公网证书必须有效、密钥匹配且覆盖 PUBLIC_DOMAIN。
 "$HELPER" check-cert --cert "$TLS_CERT_ABS" --key "$TLS_KEY_ABS" --domain "$PUBLIC_DOMAIN"
 
+managed_pid_matches() {
+  managed_pid=$1
+  expected=$2
+  alternate=${3:-}
+  required_arg=${4:-}
+  [ -r "/proc/$managed_pid/cmdline" ] || return 1
+  executable=$(tr '\000' '\n' < "/proc/$managed_pid/cmdline" 2>/dev/null | sed -n '1p')
+  if [ "$executable" != "$expected" ] \
+     && { [ -z "$alternate" ] || [ "$executable" != "$alternate" ]; }; then
+    return 1
+  fi
+  if [ -n "$required_arg" ]; then
+    managed_arg=$(tr '\000' '\n' < "/proc/$managed_pid/cmdline" 2>/dev/null | sed -n '2p')
+    [ "$managed_arg" = "$required_arg" ] || return 1
+  fi
+  return 0
+}
 is_managed() {
   pidfile=$1
   expected=$2
+  alternate=${3:-}
+  required_arg=${4:-}
   [ -f "$pidfile" ] || return 1
   pid=$(cat "$pidfile" 2>/dev/null || true)
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  [ -r "/proc/$pid/cmdline" ] || return 1
-  executable=$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '1p')
-  [ "$executable" = "$expected" ]
+  managed_pid_matches "$pid" "$expected" "$alternate" "$required_arg"
 }
 pid_alive() {
   pidfile=$1
@@ -433,42 +523,46 @@ cleanup_failed_start() {
 stop_managed() {
   pidfile=$1
   expected=$2
-  if is_managed "$pidfile" "$expected"; then
+  alternate=${3:-}
+  required_arg=${4:-}
+  if is_managed "$pidfile" "$expected" "$alternate" "$required_arg"; then
     pid=$(cat "$pidfile")
     kill "$pid" 2>/dev/null || true
     i=0
     while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
-    kill -9 "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      if managed_pid_matches "$pid" "$expected" "$alternate" "$required_arg"; then
+        kill -9 "$pid" 2>/dev/null || true
+      else
+        echo "警告：PID $pid 在 SIGKILL 前身份已变化或无法确认；未发送 SIGKILL。" >&2
+      fi
+    fi
   elif [ -f "$pidfile" ]; then
     echo "警告：忽略不属于本包的陈旧 PID 文件：$pidfile" >&2
   fi
   rm -f "$pidfile"
 }
 
-# 停止现有进程。手工模式随后轮换推流码；systemd 服务模式复用受保护凭据。
-stop_managed "$ROOT/runtime/caddy.pid" "$ROOT/bin/caddy"
+# 停止现有进程。两种启动模式都会复用已有的持久凭据；仅在没有凭据文件时生成新码。
+stop_managed "$ROOT/runtime/caddy.pid" "$CADDY" "$ROOT/bin/caddy"
 stop_managed "$ROOT/runtime/gateway.pid" "$HELPER"
 # Stop the supervisor first so an intentional restart cannot race with its
 # automatic MediaMTX restart loop. Legacy deployments can have only
 # mediamtx.pid, so keep the direct-child cleanup for in-place upgrades.
-stop_managed "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh"
-if [ -f "$ROOT/runtime/mediamtx.pid" ]; then
+stop_managed "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh" "" "$ROOT/mediamtx-supervisor.sh"
+if is_managed "$ROOT/runtime/mediamtx.pid" "$MEDIAMTX" "$ROOT/bin/mediamtx"; then
   pid=$(cat "$ROOT/runtime/mediamtx.pid" 2>/dev/null || true)
-  case "$pid" in ""|*[!0-9]*) ;; *) kill -INT "$pid" 2>/dev/null || true ;; esac
+  kill -INT "$pid" 2>/dev/null || true
 fi
-stop_managed "$ROOT/runtime/mediamtx.pid" "$ROOT/bin/mediamtx"
+stop_managed "$ROOT/runtime/mediamtx.pid" "$MEDIAMTX" "$ROOT/bin/mediamtx"
 rm -f "$ROOT/runtime/mediamtx.stop"
 rm -f "$ROOT/runtime/mediamtx.generated.yml" "$ROOT/runtime/Caddyfile"
 
-# 在旧进程停止后原子安装当前架构的修补版/安全基线构建，支持在原目录
-# 安全升级和重启，且不会复用以前在线下载的 Caddy。
-cp "$MEDIAMTX_BUNDLED" "$ROOT/bin/mediamtx.install"
-chmod 755 "$ROOT/bin/mediamtx.install"
-mv -f "$ROOT/bin/mediamtx.install" "$ROOT/bin/mediamtx"
-cp "$CADDY_BUNDLED" "$ROOT/bin/caddy.install"
-chmod 755 "$ROOT/bin/caddy.install"
-mv -f "$ROOT/bin/caddy.install" "$ROOT/bin/caddy"
-secure_owned_path "$ROOT/bin/caddy" f
+# Execute the immutable per-architecture files directly. This keeps service
+# operation compatible with a read-only bin/web/third_party tree and removes a
+# persistence path in which a compromised process could replace the next
+# executable or public player asset. The alternate paths above only exist to
+# stop processes left by an older in-place deployment.
 
 # TCP/443 必须空闲，稍后由 Caddy 同时提供 HTTP/1.1 / HTTP/2。
 if "$HELPER" tcp --addr 127.0.0.1:443 --timeout 250ms >/dev/null 2>&1; then
@@ -496,7 +590,10 @@ done
 PUBLISH_CREDENTIALS="$ROOT/runtime/publish.credentials"
 STREAM_KEY=
 PASS_HASH=
-if [ "$START_MODE" = service ] && [ -f "$PUBLISH_CREDENTIALS" ]; then
+if [ -f "$PUBLISH_CREDENTIALS" ]; then
+  # Both service and manual runs reuse the root-only persisted credential so a
+  # stop/start cycle (or a manual run between service runs) never invalidates
+  # the key already configured in OBS.
   secure_owned_path "$PUBLISH_CREDENTIALS" f
   credentials_mode=$(stat -c %a "$PUBLISH_CREDENTIALS")
   credentials_perm=$((0$credentials_mode))
@@ -532,8 +629,6 @@ else
     } > "$CREDENTIALS_TMP"
     chmod 600 "$CREDENTIALS_TMP"
     mv -f "$CREDENTIALS_TMP" "$PUBLISH_CREDENTIALS"
-  else
-    rm -f "$PUBLISH_CREDENTIALS"
   fi
 fi
 if [ -z "$STREAM_KEY" ] || [ -z "$PASS_HASH" ]; then
@@ -549,8 +644,9 @@ BEARER_TOKEN="obs:$STREAM_KEY"
 
 # Advertise only deterministic ICE hosts. WHIP_IP keeps OBS/LAN clients on the
 # private IPv4 path; PUBLIC_HOST adds the public WHEP path. Interface auto-gather
-# is disabled in mediamtx.template.yml to avoid Windows choosing unrelated
-# IPv6/VPN/link-local candidates.
+# is disabled in mediamtx.template.yml. The Gateway independently filters every
+# public WHEP answer against PUBLIC_HOST_IPV4S, so the LAN candidate is never
+# released to a browser.
 ADDITIONAL_HOSTS="[\"$WHIP_IP\",\"$PUBLIC_HOST\"]"
 
 PASS_HASH_SED=$(escape_sed_replacement "$PASS_HASH")
@@ -584,7 +680,7 @@ if grep -Eq '__[A-Z0-9_]+__' "$ROOT/runtime/mediamtx.generated.yml" "$ROOT/runti
 fi
 
 # Caddy 强校验：HTTP/1.1 + HTTP/2 + HTTP/3，且 TLS 仅 1.3。
-if ! "$ROOT/bin/caddy" validate --config "$ROOT/runtime/Caddyfile" --adapter caddyfile >"$ROOT/logs/caddy-validate.log" 2>&1; then
+if ! "$CADDY" validate --config "$ROOT/runtime/Caddyfile" --adapter caddyfile >"$ROOT/logs/caddy-validate.log" 2>&1; then
   cat "$ROOT/logs/caddy-validate.log" >&2
   echo "Caddy 配置校验失败。" >&2
   exit 1
@@ -638,10 +734,12 @@ echo $! > "$ROOT/runtime/mediamtx-supervisor.pid"
 # 内部 Web/HLS 网关只绑定 loopback，公网只能经过 Caddy TLS 1.3 边缘。
 nohup "$HELPER" serve --dir "$ROOT/web" --addr "127.0.0.1:8080" \
   --hls-backend "http://127.0.0.1:8888" \
-  --whep-backend "http://$WHIP_IP:8889" >> "$ROOT/logs/gateway.log" 2>&1 &
+  --whep-backend "http://$WHIP_IP:8889" \
+  --whep-approved-ips "$PUBLIC_HOST_IPV4S" \
+  --whep-local-ips "$WHIP_IP" >> "$ROOT/logs/gateway.log" 2>&1 &
 echo $! > "$ROOT/runtime/gateway.pid"
 
-nohup "$ROOT/bin/caddy" run --config "$ROOT/runtime/Caddyfile" --adapter caddyfile \
+nohup "$CADDY" run --config "$ROOT/runtime/Caddyfile" --adapter caddyfile \
   >> "$ROOT/logs/caddy.log" 2>&1 &
 echo $! > "$ROOT/runtime/caddy.pid"
 
@@ -654,10 +752,10 @@ while [ "$i" -lt 60 ]; do
      && "$HELPER" tcp --addr 127.0.0.1:8189 --timeout 250ms >/dev/null 2>&1 \
      && "$HELPER" tcp --addr 127.0.0.1:8080 --timeout 250ms >/dev/null 2>&1 \
      && "$HELPER" tcp --addr 127.0.0.1:443 --timeout 250ms >/dev/null 2>&1 \
-     && is_managed "$ROOT/runtime/mediamtx.pid" "$ROOT/bin/mediamtx" \
-     && is_managed "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh" \
+     && is_managed "$ROOT/runtime/mediamtx.pid" "$MEDIAMTX" \
+     && is_managed "$ROOT/runtime/mediamtx-supervisor.pid" "/bin/sh" "" "$ROOT/mediamtx-supervisor.sh" \
      && is_managed "$ROOT/runtime/gateway.pid" "$HELPER" \
-     && is_managed "$ROOT/runtime/caddy.pid" "$ROOT/bin/caddy"; then
+     && is_managed "$ROOT/runtime/caddy.pid" "$CADDY"; then
     ready=1; break
   fi
 
@@ -743,7 +841,7 @@ printf '推流网卡      : %s (%s)\n' "$INGEST_INTERFACE" "$WHIP_IP"
 printf '允许发布来源  : %s\n' "$INGEST_ALLOW_CIDRS"
 printf '公网 WHEP     : %s/rtc/live/whep\n' "$PUBLIC_ORIGIN"
 printf 'WebRTC ICE Host: %s (A: %s, AAAA: none)\n' "$PUBLIC_HOST" "$PUBLIC_HOST_IPV4S"
-printf 'MediaMTX      : v1.19.3-r8（AOM AV1 RTMP/WHIP/HLS 修补版）\n'
+printf 'MediaMTX      : v1.21.0-r11（AOM AV1 RTMP/WHIP/HLS + 安全基线修补版）\n'
 printf '网页声音       : 初始静音，请点“开启声音”；RTMP/AAC 请使用 LL-HLS\n'
 if [ "$START_MODE" = interactive ]; then
   printf '\nOBS Stream key: %s\n' "$STREAM_KEY"

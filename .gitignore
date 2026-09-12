@@ -14,3 +14,9 @@ runtime/*
 *.sha256
 config.local.env
 
+# Local review records and release assets / 本地审阅记录与发行附件
+/local-only/
+/release-assets/
+CHANGELOG.full.*
+RELEASE_NOTES.full.*
+*.zip

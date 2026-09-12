@@ -54,12 +54,15 @@ https://:443 {
 		protocols tls1.3 tls1.3
 	}
 
-	# Strict Host/SNI enforcement runs inside the normal HTTP handler chain so
+	# Strict authority/SNI enforcement runs inside the normal HTTP handler chain so
 	# 421 responses can have Server/Via removed. This preserves
-	# the previous fail-closed Host/SNI behavior without Caddy fingerprint leakage.
+	# the previous fail-closed behavior without Caddy fingerprint leakage. The
+	# hostport placeholder intentionally retains the request authority port: the
+	# host matcher alone strips it and would accept a correct host on a wrong port.
 	@badSNI expression `{http.request.tls.server_name} != "__PUBLIC_DOMAIN__"`
-	@badHost not host __PUBLIC_DOMAIN__
+	@badAuthority expression `{http.request.hostport}.lowerAscii() != "__PUBLIC_DOMAIN__:__PUBLIC_HTTPS_PORT__".lowerAscii() && (__PUBLIC_HTTPS_PORT__ != 443 || {http.request.hostport}.lowerAscii() != "__PUBLIC_DOMAIN__".lowerAscii())`
 	handle @badSNI {
+		import security_headers
 		header {
 			-Alt-Svc
 			-Server
@@ -67,7 +70,8 @@ https://:443 {
 		}
 		respond "" 421
 	}
-	handle @badHost {
+	handle @badAuthority {
+		import security_headers
 		header {
 			-Alt-Svc
 			-Server
@@ -82,13 +86,29 @@ https://:443 {
 	# through the public site. Public WHEP requests go through the loopback Go
 	# gateway first so it can enforce per-IP creation and active-session limits,
 	# bind session control to the creating IP, and sanitize MediaMTX errors.
+	@whepOptions {
+		path /rtc/live/whep
+		method OPTIONS
+	}
+	handle @whepOptions {
+		request_body {
+			max_size 1KB
+		}
+		reverse_proxy http://127.0.0.1:8080 {
+			flush_interval -1
+			header_up Host 127.0.0.1
+			header_up -Authorization
+			header_up -Cookie
+		}
+	}
+
 	@whepCreate {
 		path /rtc/live/whep
 		method POST
 	}
 	handle @whepCreate {
 		request_body {
-			max_size 256KB
+			max_size 256KiB
 		}
 		reverse_proxy http://127.0.0.1:8080 {
 			flush_interval -1
@@ -106,7 +126,7 @@ https://:443 {
 	}
 	handle @whepSession {
 		request_body {
-			max_size 256KB
+			max_size 256KiB
 		}
 		reverse_proxy http://127.0.0.1:8080 {
 			flush_interval -1
@@ -117,8 +137,14 @@ https://:443 {
 	}
 
 	# A public caller cannot turn the WHEP prefix into an unrestricted proxy.
-	@whepInvalid path /rtc/live/whep /rtc/live/whep/*
-	handle @whepInvalid {
+	@whepCreateInvalid path /rtc/live/whep
+	handle @whepCreateInvalid {
+		header Allow "OPTIONS, POST"
+		respond "method not allowed" 405
+	}
+
+	@whepSessionInvalid path /rtc/live/whep/*
+	handle @whepSessionInvalid {
 		header Allow "POST, PATCH, DELETE"
 		respond "method not allowed" 405
 	}
@@ -131,14 +157,25 @@ https://:443 {
 		respond 404
 	}
 
+	# Deny the MediaMTX built-in HLS player page and its embedded hls.js copy
+	# from the public entry. The project Web Player serves its own /hls.min.js;
+	# only these exact names are removed so manifests, segments, and LL-HLS
+	# parts under /live/* keep proxying unchanged. Caddy path matchers ignore
+	# the query string, so query variants cannot bypass the block.
+	@blockedLivePlayer path /live /live/ /live/hls.min.js /live/hls.min.js.map
+	handle @blockedLivePlayer {
+		header Cache-Control "no-store"
+		respond 404
+	}
+
 	# Publicly allowed player/HLS paths.
 	@allowed path \
  / \
  /index.html \
  /app.css \
  /app.js \
+ /hls-weak-network-policy.js \
  /hls.min.js \
- /live \
  /live/*
 
 	# IMPORTANT:
@@ -147,6 +184,11 @@ https://:443 {
 		reverse_proxy 127.0.0.1:8080 {
 			flush_interval -1
 			header_up Host 127.0.0.1
+			# Anonymous player/HLS routes never need browser credentials. The Go
+			# gateway also enforces this boundary and only retains MediaMTX's own
+			# cookieCheck/hlsSession cookies.
+			header_up -Authorization
+			header_up -Proxy-Authorization
 		}
 	}
 

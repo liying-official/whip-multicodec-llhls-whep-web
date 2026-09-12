@@ -16,10 +16,10 @@ index 4021e74..a3c0fea 100644
  		if err != nil {
  			return fmt.Errorf("invalid AV1 configuration: %w", err)
 diff --git a/pkg/message/reader_test.go b/pkg/message/reader_test.go
-index 1c5cf9f..62ed3d3 100644
+index f531a01..77347d6 100644
 --- a/pkg/message/reader_test.go
 +++ b/pkg/message/reader_test.go
-@@ -876,6 +876,25 @@ func TestReader(t *testing.T) {
+@@ -911,6 +911,25 @@ func TestReader(t *testing.T) {
  	}
  }
  
@@ -31,13 +31,13 @@ index 1c5cf9f..62ed3d3 100644
 +	}
 +
 +	bc := bytecounter.NewReader(bytes.NewReader(buf))
-+	r := NewReader(bc, bc, nil)
++	r := message.NewReader(bc, bc, nil)
 +	dec, err := r.Read()
 +	require.NoError(t, err)
-+	require.Equal(t, &VideoExSequenceStart{
++	require.Equal(t, &message.VideoExSequenceStart{
 +		ChunkStreamID:   6,
 +		MessageStreamID: 0x1000000,
-+		FourCC:          FourCCAV1,
++		FourCC:          message.FourCCAV1,
 +		AV1Config:       &mp4.Av1C{},
 +	}, dec)
 +}
@@ -46,10 +46,10 @@ index 1c5cf9f..62ed3d3 100644
  	buf := []byte{
  		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x04,
 diff --git a/reader.go b/reader.go
-index 5cb1f04..40fc4d0 100644
+index b5e9bf3..6ff8e61 100644
 --- a/reader.go
 +++ b/reader.go
-@@ -299,6 +299,14 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
+@@ -306,6 +306,14 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
  			return fmt.Errorf("video track %d already setupped", trackID)
  		}
  
@@ -65,10 +65,10 @@ index 5cb1f04..40fc4d0 100644
  		videoTracks[trackID], err = videoTrackFromSequenceStart(msg)
  		if err != nil {
 diff --git a/reader_test.go b/reader_test.go
-index f49d5ed..8c4e785 100644
+index 74797f5..fe963d3 100644
 --- a/reader_test.go
 +++ b/reader_test.go
-@@ -637,6 +637,12 @@ func TestReadTracks(t *testing.T) {
+@@ -743,6 +743,12 @@ func TestReadTracks(t *testing.T) {
  						},
  					},
  				},

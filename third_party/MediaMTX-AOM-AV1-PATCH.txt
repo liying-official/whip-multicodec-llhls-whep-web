@@ -1,59 +1,270 @@
-MediaMTX AOM AV1 RTMP / WHIP / HLS compatibility patch
-==========================================================
+v1.35 MediaMTX AOM AV1 RTMP / WHIP / HLS 兼容记录 / Compatibility record
+==================================================================
 
-Bundled application base:
-  MediaMTX v1.19.3
+Project version: v1.35. Commands, paths and verification values below are shared
+by both languages. Dated validation records are preserved from that verification;
+this documentation review does not claim a new runtime test or attestation run.
+
+Bundled source base and custom version:
+  MediaMTX v1.21.0
+  upstream commit 2c6727904fbf233615de74a6c54a9b94dbf6025d
+  custom build version v1.21.0-r11
 
 Patched dependency base:
-  github.com/bluenviron/gortmplib v0.4.1
+  github.com/bluenviron/gortmplib v1.0.2
+  upstream commit fbafd129baf54d49a2e3243f620d738ed72ff82e
 
-Build version:
-  v1.19.3-r8
+Toolchain and dependency graph:
+  Go 1.27.1 with GOTOOLCHAIN=local. The r11 version patch pins this Go
+  baseline. Use the exact included MediaMTX-go.mod
+  and MediaMTX-go.sum, whose gortmplib replacement points to a sibling tree.
+  Preserve the current x/crypto v0.56.0 security floor. Other upstream versions include gohlslib v2.4.4,
+  mediacommon v2.9.4, gortsplib v5.6.5 and Pion WebRTC v4.2.19.
 
-Problems fixed:
-  1. FFmpeg and OBS AOM AV1 can emit an Enhanced RTMP video sequence-start
-     containing only the AV1 FourCC ("av01"). Upstream gortmplib v0.4.1
-     attempts to decode the empty av1C body and closes the publisher with EOF.
-  2. OBS 32.2.1 uses libdatachannel v0.24.2. Its AV1 RTP packetizer can retain
-     the OBU size field, mishandle extension headers, or omit the OBU base
-     header. MediaMTX then either destroys the HLS muxer, returns an empty 500,
-     or cannot recognize AV1 random-access units.
-  3. Some AV1 senders do not repeat the sequence header on every key frame.
-     gohlslib uses the sequence header as its AV1 random-access marker, so the
-     HLS segment can grow until hlsSegmentMaxSize is reached.
+Required patch order (after cloning the exact source commits):
+  gortmplib:
+    gortmplib-v1.0.2-av1-empty-sequence-start.patch
+  MediaMTX:
+    mediamtx-v1.21.0-av1-whip-hls.patch
+    mediamtx-v1.21.0-av1-valid-test-fixtures.patch
+    mediamtx-v1.21.0-r11-version.patch
+    mediamtx-v1.21.0-go1.27-test-isolation.patch
+    mediamtx-v1.21.0-webrtc-local-candidate-priority.patch
+    mediamtx-v1.21.0-whip-rtp-reorder-512.patch
+    mediamtx-v1.21.0-whip-reorder-regressions.patch
+    mediamtx-v1.21.0-hlsjs-1.7.3.patch
 
-Patch:
-  1. Accept a five-byte AV1 Enhanced RTMP sequence-start as an empty placeholder.
-  2. Wait for the later valid av1C before configuring the RTMP AV1 track.
-  3. Normalize WebRTC AV1 OBU size fields and base-layer extension headers.
-  4. Reconstruct the known libdatachannel <=0.24.3 missing-base-header form.
-  5. Drop invalid or enhancement-layer OBUs instead of crashing every HLS reader.
-  6. Parse AV1 frame_type, cache the startup sequence header, and restore it only
-     before an actual KEY_FRAME when the sender omitted the repeated header.
+Compatibility behavior retained:
+  1. Accept the five-byte AV1 Enhanced RTMP sequence-start placeholder, then
+     wait for a later valid av1C before configuring the track. The change is
+     AV1-specific; malformed nonempty AV1 configs still fail, and upstream's
+     newer H264/H265 parameter checks remain intact.
+  2. Normalize AV1 OBU internal sizes only when LEB128 length exactly matches
+     the supplied payload. Normalize base-layer extension headers, reject
+     invalid header/extension bits and enhancement layers, and filter temporal
+     delimiters. Retain the narrowly matched libdatachannel missing-base-header
+     compatibility form used by the existing OBS/AOM path.
+  3. Cache a successfully parsed sequence header and restore it only before
+     an actual KEY_FRAME if the sender omitted it. Do not prepend it to inter
+     frames or show-existing-frame units. gohlslib v2.4.4 and mediacommon v2.9.4
+     still recognize AV1 random access through sequence-header presence, so
+     this AOM compatibility behavior remains necessary.
+  4. Keep valid FRAME OBU fixtures instead of reserved type-0 arbitrary bytes.
+     Keep fixed-port WHIP auth tests isolated from stale HTTP idle connections.
+     These changes affect tests, not production authentication.
+  5. Keep configured private/loopback/link-local additional ICE hosts above
+     configured public hosts in priority and preserve their configured order.
+     No new interfaces, permitted clients or listening ports are introduced.
+     The public WHEP gateway independently filters candidates: public requesters
+     receive only startup-approved PUBLIC_HOST IPv4 addresses. Eligible private,
+     loopback or link-local IPv4 requesters may also receive the exact configured
+     WHIP_IP; other local addresses remain excluded.
+  6. Keep video RTP reordering and SRTP replay protection at the bounded
+     512-packet window. SRTP authentication and replay rejection remain enabled.
+     gortsplib v5.6.5 still defaults to 64; audio reordering uses its default.
+
+Current upstream integration:
+  None of the retained compatibility/runtime fixes is upstreamed in v1.21.0
+  or gortmplib v1.0.2. No MoQ teardown test patch is needed for the current
+  upstream test server. It ignores terminal session/write errors in that fixture.
+  Existing
+  received-payload, source-info, authentication-format and fingerprint-error
+  tests remain and must be run. Production MoQ authentication is not relaxed
+  by the project compatibility patches.
+
+  v1.21.0 adds RTX codec registration for incoming video; retain that upstream
+  addition and its negotiation tests. Pion returns repaired packets with their
+  original sequence number, payload type and SSRC, so delayed RTX packets still
+  need the MediaMTX reorder window. RTX requires publisher support and does not
+  guarantee loss-free operation under arbitrary network impairment.
+
+  v1.21.0's allowed-origin scheme/dot matching, Origin reflection/Vary header
+  and empty default API/metrics/pprof origin lists are untouched by these patches.
+  CORS is separate from authentication and must not replace the project ACL,
+  public route allowlist, loopback bindings or WHEP ownership checks.
+
+Embedded HLS library:
+  hls.js v1.7.3, identical to the project's unchanged npm asset.
+  asset SHA-256:
+    a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e
+  official GitHub release.zip SHA-256 pinned by the generator patch:
+    abbda85f3e9b8325fc6b8dbf4fa612ea87144ebad93c2150594e64aad58ec529
+  Build by copying web/hls.min.js to internal/servers/hls/hls.min.js and only
+  generating the rpicamera asset. The generator's VERSION and HASH are also
+  updated, so later HLS regeneration stays on v1.7.3. Do not run the core
+  version getter after applying the custom version patch.
+
+RTP and security regression fixture:
+  Project input: tests/fixtures/whip-av1-sequences.bin
+  Copy before MediaMTX tests to:
+    internal/protocols/webrtc/testdata/whip-av1-sequences.bin
+  SHA-256: dbd953ce8b7372c6ffbf197c34158238517af0abd98a23a0cf6bea3d3b90c9e9
+  The input records the prior real AV1 WHIP packet arrival order: 126869 unique
+  packets, 202 duplicates, wraparound and reordering up to 101 packets.
+  TestInboundReorderCapturedWHIP requires complete ordered delivery with zero
+  loss and expected duplicate rejection under AES128-CM/HMAC-SHA1-80 and
+  AEAD-AES128-GCM. Old replays and fresh-sequence tampered ciphertext must fail;
+  a valid packet with that fresh sequence must then succeed, and its replay fail.
+  The existing preserve-real-gaps case now fills inboundRTPReorderWindow while
+  keeping its +2 missing-sequence assertion.
 
 Encoder requirement:
-  HLS/CMAF still requires real random-access frames. In OBS AOM AV1, set
-  Keyframe Interval to 1-2 seconds (2 seconds tested). Do not use 0/automatic.
-  The server does not transcode and cannot manufacture a missing key frame.
+  HLS/CMAF still needs real random-access frames; keep the existing OBS keyframe
+  interval of 1-2 seconds. The server does not transcode or create key frames.
 
-Upstream libdatachannel references (unreleased after v0.24.3 at package time):
-  https://github.com/paullouisageneau/libdatachannel/commit/78fea5758e953421c105cd5023b96187c52dcf78
-  https://github.com/paullouisageneau/libdatachannel/commit/9822391551f1a7f8cd13a25f87b6b744f963f882
+Provenance and current validation (2026-09-12):
+  Exact official source tag commits and clean patch application were checked.
+  Both official v1.21.0 Linux amd64/arm64 release artifacts passed GitHub CLI
+  2.100.0 attestation verification with the exact source commit/ref, release
+  workflow and GitHub-hosted-runner policy. The verified Rekor timestamp is
+  2026-09-06T05:28:38+08:00. See MediaMTX-v1.21.0-UPSTREAM-ATTESTATION.txt for
+  verified subject hashes and identity; these official attestations do not
+  certify the custom patched binaries as upstream release artifacts.
 
-Regression coverage:
-  - Raw Enhanced RTMP empty AV1 sequence-start decoding.
-  - Empty placeholder followed by a valid av1C track configuration.
-  - AV1 OBU size, extension, enhancement-layer, invalid-size, and
-    libdatachannel missing-base-header normalization tests.
-  - Cached sequence-header restoration only on parsed KEY_FRAME units.
-  - OBS-like AOM WHIP publisher that sends the sequence header only once.
-  - AV1+Opus LL-HLS six-second decode with 180 decoded video frames.
-  - Live 1920x1080 AOM AV1+Opus WHIP, HLS, WHEP, public TLS, and browser tests.
+  Complete MediaMTX normal and race suites each passed 1,226 test/subtest runs.
+  Complete patched gortmplib normal and race suites each passed 426 runs.
+  MediaMTX vet passed. The captured WHIP sequence replay passed both SRTP
+  profiles: 126869 delivered, zero lost, 202 duplicate rejections per profile.
+  No executed tests were skipped; JSON skip events were packages without tests.
+  Full upstream suites used an isolated mount/network namespace with a local
+  STUN responder and multicast route. Initial route/STUN fixture failures were
+  corrected without changing assertions. The local fixture does not validate
+  Google STUN reachability or public NAT traversal.
+
+  The upgraded compiled helper and Caddy passed 115/115 security boundary checks
+  against a controlled media backend; the project JavaScript suite passed
+  124/124. Real systemd-nspawn acceptance passed 101/101 checks with the actual
+  upgraded MediaMTX and systemd services: installation and restart were each
+  observed stable for 152 seconds, including authentication, ingest ACL,
+  listener, stop and retained-credential checks. The final container fixture
+  used a container-only trusted CA/leaf after a cold public-certificate fixture
+  waited on unavailable OCSP/DNS access; certificate verification stayed enabled
+  and production certificates were unchanged. These lifecycle checks do not
+  establish real encoded-media continuity. Live weak-network playback acceptance
+  and remaining coverage limits are recorded in the accompanying upgrade report.
+
+Vulnerability audit (2026-09-12):
+  govulncheck v1.8.0 used Go 1.27.1 and the database updated at
+  2026-09-10T14:48:42Z. The MediaMTX executable entry (.) source scan reported
+  one module-only finding: GO-2026-5932 in x/crypto v0.56.0. It reported no
+  affected imported package or callable-symbol finding at that entry.
+  Each amd64/arm64 binary scan retained module/package/symbol findings for
+  GO-2026-5932, the unmaintained OpenPGP API advisory with no fixed version
+  in this database. They are not zero-warning binaries. Binary symbol matches
+  alone do not establish a runtime call path. JSON-mode scan exit 0 only records
+  completion and must not be substituted for parsing the finding records.
 
 Bundled binary SHA-256:
-  amd64  d40394a61ac80a8b465d31c7a01241a13449623610a46018437007bc6aa2abcd
-  arm64  e95a3ac205300c8afacb037aa263d2b53597326e301e6850e46b1b1de431a012
+  amd64  d2a1acd4296d1d41443007069eff85bc622a865cbc169e5e752bdfdcc083b292
+  arm64  c7e91886e84ba890c648f8b1c89dda624ed8ad1b1a516ef96a34925459b44b99
+
+Reproducibility:
+  Both MediaMTX architectures were rebuilt from the same source/module graph
+  and generated assets with a fresh GOCACHE. Each matched the bundled bytes
+  (cmp exit 0). The build used Go 1.27.1, GOTOOLCHAIN=local, CGO disabled,
+  -mod=readonly, -trimpath, -buildvcs=false, -p 4 and
+  -ldflags='-s -w -buildid='. BUILDING.md contains the complete commands.
 
 Licenses:
   MediaMTX-LICENSE.txt
   gortmplib-LICENSE.txt
+
+中文说明（与上文共用固定提交、补丁顺序和校验值）
+================================================
+
+版本、源码与工具链：
+  本项目版本为 v1.35。MediaMTX 源码为 v1.21.0、实际定制二进制标识为
+  v1.21.0-r11；gortmplib 源码为 v1.0.2。两者的准确上游提交见上文。
+  使用 Go 1.27.1 和 GOTOOLCHAIN=local，r11 补丁固定该 Go 基线。随包的
+  MediaMTX-go.mod/go.sum 是精确依赖图，gortmplib replace 指向同级源码目录。
+  必须保留当前 x/crypto v0.56.0 安全基线。
+  其他当前依赖包括 gohlslib v2.4.4、mediacommon v2.9.4、gortsplib v5.6.5、
+  Pion WebRTC v4.2.19。克隆并核对固定提交后，严格按上文顺序应用全部补丁。
+
+保留的兼容行为：
+  1. 接受五字节 AV1 Enhanced RTMP sequence-start 占位符，等后续有效 av1C
+     到达后再配置轨道。变更只作用于 AV1；非空但损坏的 AV1 配置仍拒绝，
+     上游 H264/H265 参数检查保持完整。
+  2. 仅当 LEB128 长度与实际载荷完全相等时归一化 AV1 OBU 内部长度；归一化基础层
+     扩展头，拒绝非法头/扩展位和增强层，并过滤时间分隔符。保留现有 OBS/AOM
+     路径使用的、严格匹配的 libdatachannel 缺基础头兼容格式。
+  3. 缓存成功解析的序列头；仅当发送方省略序列头且单元确为 KEY_FRAME 时补回。
+     不对帧间帧或 show-existing-frame 单元前置序列头。当前 gohlslib 和
+     mediacommon 仍用序列头是否存在识别 AV1 随机访问，因此仍需要此 AOM 兼容。
+  4. 使用有效 FRAME OBU 测试数据，避免保留类型 0 的任意字节；固定端口 WHIP
+     鉴权测试隔离残留 HTTP 空闲连接。这些修改只影响测试，不改变生产鉴权。
+  5. 配置中的私有/回环/链路本地附加 ICE 地址优先于配置的公网地址，并保持配置
+     顺序；不新增接口、允许的客户端或监听端口。公网 WHEP 网关另行过滤候选：
+     公网请求者仅收到启动时已批准的 PUBLIC_HOST IPv4；符合条件的私有、回环或
+     链路本地 IPv4 请求者还可收到精确配置的 WHIP_IP，其他本地地址仍排除。
+  6. 视频 RTP 重排与 SRTP 防重放均保持有界 512 包窗口；SRTP 鉴权和重放拒绝
+     继续启用。gortsplib 默认仍为 64 包，音频重排使用上游默认值。
+
+当前上游整合：
+  这些兼容/运行时修复尚未合入 MediaMTX v1.21.0 或 gortmplib v1.0.2。
+  当前上游 MoQ 测试服务器无需 teardown 补丁；夹具忽略终止会话/写入错误，
+  接收载荷、来源信息、鉴权格式和指纹错误测试仍保留并必须运行。项目兼容补丁
+  没有放宽生产 MoQ 鉴权。
+  MediaMTX v1.21.0 新增的入站视频 RTX 编解码器注册及协商测试保留。Pion 将
+  修复包恢复为原序列号、载荷类型和 SSRC，延迟 RTX 包仍需要重排窗口。
+  RTX 依赖推流端支持，不能保证任意弱网条件下零丢包。
+  上游 allowed-origin 的 scheme/点匹配、Origin 反射/Vary 响应头，以及 API、
+  metrics、pprof 的默认空 Origin 列表均未修改。CORS 独立于鉴权，不能替代
+  项目 ACL、公网路由白名单、回环绑定或 WHEP 会话归属检查。
+
+内嵌 HLS 库：
+  hls.js v1.7.3 与项目未修改的 npm 资源完全一致。上文分别列出运行资源 SHA-256
+  和生成器补丁固定的官方 GitHub release.zip SHA-256，不能混用。
+  将 web/hls.min.js 复制到 internal/servers/hls/hls.min.js，仅生成 rpicamera
+  资源；生成器 VERSION/HASH 也已更新，使日后 HLS 生成仍固定 v1.7.3。
+  应用定制版本补丁后不要再次运行核心版本生成器。
+
+RTP 与安全回归样本：
+  输入 tests/fixtures/whip-av1-sequences.bin 须在测试前复制到上文 testdata 路径。
+  SHA-256 见上文。该样本记录真实 AV1 WHIP 到达顺序：126869 个唯一包、202 个
+  重复包，包含回绕及最大 101 包乱序。TestInboundReorderCapturedWHIP 在
+  AES128-CM/HMAC-SHA1-80 和 AEAD-AES128-GCM 下要求完整有序交付、零丢包并
+  正确拒绝重复包。旧包重放和新序列号篡改密文必须失败；同一新序列号的有效包
+  随后必须成功，其再次重放必须失败。真实缺包用例填满 inboundRTPReorderWindow，
+  继续检查 +2 缺失序列断言。
+
+编码器要求：
+  HLS/CMAF 仍需真实随机访问帧；OBS 关键帧间隔保持 1–2 秒。服务端不转码，
+  也不会生成关键帧。
+
+来源与验证记录（2026-09-12）：
+  已核对官方源码标签提交及补丁干净应用。官方 v1.21.0 Linux amd64/arm64
+  发行包均通过 GitHub CLI 2.100.0 来源证明验证，约束准确提交/ref、发行工作流
+  和 GitHub 托管 runner。核验的 Rekor 时间戳为 2026-09-06T05:28:38+08:00。
+  详细主体哈希和签名身份见 MediaMTX-v1.21.0-UPSTREAM-ATTESTATION.txt；
+  上游证明不把本项目定制二进制认证为官方发行包。
+  完整 MediaMTX 普通和 race 套件各通过 1,226 个测试/子测试；完整修补版
+  gortmplib 普通和 race 套件各通过 426 个；MediaMTX vet 通过。捕获 WHIP
+  序列回放在两种 SRTP 配置下均交付 126869 包、零丢失并拒绝 202 个重复包。
+  没有跳过已执行用例；JSON skip 事件对应没有测试文件的包。完整上游测试使用
+  隔离挂载/网络命名空间、本地 STUN 响应器和多播路由；初次路由/STUN 夹具失败
+  通过修正环境解决，没有修改断言。本地夹具不验证 Google STUN 或公网 NAT。
+  升级后的实际 helper 和 Caddy 在受控媒体后端上通过 115/115 安全边界检查，
+  项目 JavaScript 通过 124/124。实际 systemd-nspawn 环境使用升级后的 MediaMTX
+  和 systemd 服务通过 101/101 检查；安装、重启各观察 152 秒稳定，覆盖鉴权、
+  推流 ACL、监听、停止与凭据保留。冷启动公网证书夹具曾等待不可用 OCSP/DNS；
+  最终使用只在容器内受信任的测试 CA/叶证书，证书验证保持启用，线上证书未变。
+  生命周期检查不证明真实编码媒体连续性；实时弱网验收及覆盖限制见随附升级报告。
+  本次文档整理不表示重新执行上述运行测试。
+
+漏洞审计记录（2026-09-12）：
+  govulncheck v1.8.0 使用 Go 1.27.1 和更新至 2026-09-10T14:48:42Z 的数据库。
+  MediaMTX 可执行入口（.）源码扫描仅报告 x/crypto v0.56.0 的模块级
+  GO-2026-5932，没有受影响导入包或可调用符号发现。两个架构的二进制扫描仍有
+  同一公告的模块/包/符号发现，即未维护 OpenPGP API 的公告，数据库没有修复版本。
+  不能称为零警告二进制；单凭符号匹配不能证明运行时调用路径；JSON 模式退出 0
+  仅表示扫描完成，必须读取发现记录判定结果。
+
+二进制与可重现性：
+  上文 amd64/arm64 SHA-256 对应实际随包二进制。两个架构以相同源码、依赖图、
+  生成资源和全新 GOCACHE 重建，均逐字节相同（cmp 退出 0）。参数为 Go 1.27.1、
+  GOTOOLCHAIN=local、禁用 CGO、-mod=readonly、-trimpath、-buildvcs=false、
+  -p 4 和 -ldflags='-s -w -buildid='；完整命令见 BUILDING.md。
+
+许可证：
+  MediaMTX-LICENSE.txt 和 gortmplib-LICENSE.txt，法律文本保持原样。

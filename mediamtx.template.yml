@@ -2,7 +2,8 @@ logLevel: info
 readTimeout: 30s
 writeTimeout: 30s
 
-# 每次启动随机生成 OBS 发布密码；磁盘中只保存 SHA-256 哈希。
+# 每次启动随机生成 OBS 发布密码；systemd 模式将明文推流码与 SHA-256
+# 摘要保存在 root-only 的 runtime/publish.credentials，手工模式不会持久化。
 authMethod: internal
 authInternalUsers:
   - user: obs
@@ -36,16 +37,20 @@ webrtc: true
 webrtcAddress: "__INGEST_IP__:8889"
 webrtcEncryption: false
 webrtcAllowOrigins: []
-# Public WHEP requests reach MediaMTX only through the loopback Gateway. Trust it
-# so X-Forwarded-For can preserve the real viewer IP for loopback-only metrics.
-webrtcTrustedProxies: ["127.0.0.1", "::1"]
+# Public WHEP requests reach MediaMTX only through the same-host Gateway. It
+# connects to the LAN-bound WebRTC listener through this server's exact ingest
+# IP, so trust only loopback plus that single address to preserve real viewer IP.
+webrtcTrustedProxies: ["127.0.0.1", "::1", "__INGEST_IP__"]
 webrtcLocalUDPAddress: :8189
 # TCP media fallback helps software encoders and WHEP viewers on networks that block UDP.
 webrtcLocalTCPAddress: :8189
 # Do not advertise every server interface (including unrelated IPv6/VPN/link-local
-# addresses). Explicitly advertise only the LAN ingest IPv4 plus the mandatory
-# PUBLIC_HOST A-only DNS name. DDNS can update its A record when public IPv4 changes. Public WHEP also filters non-IPv4 candidates.
-# This makes candidate selection deterministic across Windows Chromium/Edge.
+# addresses). MediaMTX receives the LAN ingest IPv4 plus the mandatory
+# PUBLIC_HOST A-only DNS name so LAN WHIP remains usable. Before public startup,
+# every PUBLIC_HOST A record must be publicly routable. The Gateway freezes that
+# complete startup snapshot and exposes only exact matching IPv4 candidates in
+# public WHEP answers; the LAN address, IPv6, mDNS, malformed and unapproved
+# public candidates are removed, and an empty result fails closed.
 webrtcIPsFromInterfaces: false
 webrtcAdditionalHosts: __WEBRTC_ADDITIONAL_HOSTS__
 # The upstream default is 2s. 4K software x264/SVT-AV1 can take longer to emit

@@ -1,40 +1,104 @@
-DNS 配置
-========
+DNS 配置 / DNS configuration
+===============================
+项目版本 / Project version: v1.35
 
-公网网页 PUBLIC_DOMAIN 可使用普通 A / AAAA。WebRTC 的 PUBLIC_HOST 必须使用仅有 IPv4 A、没有 AAAA 的域名。
+中文
+----
 
-示例：
-  live.example.com. 300 IN A 203.0.113.10
+域名与启动校验
+PUBLIC_DOMAIN 是观众访问网页、HLS 与 WHEP 信令的 HTTPS 域名，可配置 A / AAAA。
+PUBLIC_HOST 是 WebRTC ICE 使用的域名，必须至少有一个可公开路由的 IPv4 A 记录，
+且不能有 AAAA；最多允许 16 个不同的合格 IPv4。两者可以相同；主站需要 IPv6 时，建议给 PUBLIC_HOST 使用独立的
+A-only 子域名。不要在 PUBLIC_HOST 填写协议、端口或裸 IP。
 
-有 IPv6：
-  # PUBLIC_DOMAIN 如需 IPv6 可另有 AAAA；PUBLIC_HOST 不要设置 AAAA。
+示例（须替换占位符）：
+  PUBLIC_DOMAIN=live.example.com
+  PUBLIC_HOST=rtc.example.com
 
-HTTP/3 / HTTPS RR
------------------
-HTTPS/SVCB RR 不再是必须项。
+  live.example.com. 300 IN A <PUBLIC_IPV4>
+  rtc.example.com.  300 IN A <PUBLIC_IPV4>
 
-支持它的 DNS 服务商可以额外发布 HTTP/3 能力以优化首次连接，但即使不配置，
-浏览器仍可先通过 PUBLIC_HTTPS_PORT/TCP 的 HTTP/2/HTTP/1.1 连接，并从
-Caddy 的 Alt-Svc 发现 HTTP/3。
+PUBLIC_DOMAIN 可另加 AAAA；PUBLIC_HOST 不要加 AAAA。所有 PUBLIC_HOST A 记录
+必须通过启动检查：私网、回环、链路本地、CGNAT、文档保留段和其他特殊用途
+IPv4 均被拒绝。A/AAAA 查询共用 30 秒总时限；解析失败、超时、存在 AAAA 或任一
+A 记录不合格都会拒绝启动，即使当前只打算使用 HLS，也不能省略 PUBLIC_HOST。
 
-服务器本机始终同时提供：
-  TCP/443：HTTP/1.1 + HTTP/2
+全部合格 A 记录会冻结为本次网关进程的公网 WHEP ICE 精确白名单。DDNS 的 A 记录
+变化后应重启服务，让新记录集合生效。公网 WHEP 不公告 IPv6、私网或其他未经批准
+的地址；私网请求可另外获得服务器的精确 WHIP_IP 地址。
+
+HTTPS 端口与 HTTP/3
+start.sh 的 PUBLIC_HTTPS_PORT 内置默认是 443，实际以 config.env 中的值为准；
+分发包使用未配置模板，使用前必须填写自己的域名，并按实际映射设置端口。
+服务器 Caddy 始终监听：
+  TCP/443：HTTP/1.1、HTTP/2
   UDP/443：HTTP/3 / QUIC
+两者仅接受 TLS 1.3。
 
-且两条路径都只允许 TLS 1.3。
-
-公网端口由 config.env 的 PUBLIC_HTTPS_PORT 指定，默认 443。路由器必须同时配置：
+路由器/NAT 应按协议分别映射：
   TCP/PUBLIC_HTTPS_PORT -> 服务器 TCP/443
   UDP/PUBLIC_HTTPS_PORT -> 服务器 UDP/443
 
-使用非标准公网端口时填写 `PUBLIC_HTTPS_PORT=<PUBLIC_HTTPS_PORT>`，观众访问
-`https://live.example.com:<PUBLIC_HTTPS_PORT>/`，响应会通告相同端口的
-HTTP/3 Alt-Svc。若同时发布 HTTPS/SVCB RR，其 port 参数也必须与
-PUBLIC_HTTPS_PORT 一致；不要仍写 443。
+例如设置 PUBLIC_HTTPS_PORT=8443 时，观众地址为：
+  https://live.example.com:8443/
 
-PUBLIC_HOST / WebRTC ICE
--------------------------
-PUBLIC_HOST 必须填写公网 DNS 域名并拥有 IPv4 A 记录，而且不能有 AAAA。公网 IPv4 可以通过 DDNS 动态更新。若主站需要 IPv6，建议使用独立的 A-only WebRTC 子域名。
-示例：PUBLIC_HOST=live.example.com
-不要填写协议、端口或裸 IP；公网网页端口只写在 PUBLIC_HTTPS_PORT。
-start.sh 在 DNS 无法解析时会拒绝启动。
+PUBLIC_HTTPS_PORT 不是更改本机监听端口的开关。HTTP/3 Alt-Svc 会通告该公网端口；
+TCP 与 UDP 应使用相同的公网端口。仅映射 TCP 时 HTTP/1.1/2 可用，HTTP/3 不可用。
+
+HTTPS/SVCB RR 是可选优化，不是部署前提。支持它的 DNS 服务商可以公告 HTTP/3，
+其 port 参数必须与 PUBLIC_HTTPS_PORT 相同。不配置时，浏览器仍可经 HTTPS
+连接获得 Alt-Svc 并发现 HTTP/3。WebRTC 媒体的 UDP/TCP 8189 另见 FIREWALL.txt；
+HTTPS DNS 记录或 Alt-Svc 不会代替该媒体端口的路由/NAT 配置。
+
+English
+-------
+
+Domains and startup validation
+PUBLIC_DOMAIN is the HTTPS hostname for the player, HLS and WHEP signalling; it may
+have A and AAAA records. PUBLIC_HOST is the WebRTC ICE hostname: it must have at
+least one publicly routable IPv4 A record and no AAAA records, with at most
+16 distinct approved IPv4 addresses. The hostnames may match. If the main site needs IPv6, use a separate A-only hostname for PUBLIC_HOST.
+Do not put a scheme, port or literal IP address in PUBLIC_HOST.
+
+Example (replace the placeholders):
+  PUBLIC_DOMAIN=live.example.com
+  PUBLIC_HOST=rtc.example.com
+
+  live.example.com. 300 IN A <PUBLIC_IPV4>
+  rtc.example.com.  300 IN A <PUBLIC_IPV4>
+
+PUBLIC_DOMAIN may also have AAAA records; PUBLIC_HOST must not. Every PUBLIC_HOST
+A record is checked at startup. Private, loopback, link-local, CGNAT, documentation
+and other special-use IPv4 addresses are rejected. A and AAAA lookups share a
+30-second total deadline. Resolution failure, timeout, any AAAA record or any
+invalid A record prevents startup. PUBLIC_HOST is required even for HLS-only use.
+
+The gateway freezes all approved A records as the exact public WHEP ICE allowlist
+for that process. Restart the service after a DDNS A-record change. Public WHEP
+does not advertise IPv6, private or unrelated addresses. Requests from private
+addresses may additionally receive the server's exact WHIP_IP candidate.
+
+HTTPS port and HTTP/3
+The built-in PUBLIC_HTTPS_PORT default in start.sh is 443; config.env overrides it.
+The distributed package uses an unconfigured template. Set your hostnames and
+actual mapped port before deploying. Caddy always listens locally on:
+  TCP/443: HTTP/1.1 and HTTP/2
+  UDP/443: HTTP/3 / QUIC
+Both require TLS 1.3.
+
+Configure protocol-specific router/NAT mappings:
+  TCP/PUBLIC_HTTPS_PORT -> server TCP/443
+  UDP/PUBLIC_HTTPS_PORT -> server UDP/443
+
+With PUBLIC_HTTPS_PORT=8443, the viewer URL is:
+  https://live.example.com:8443/
+
+PUBLIC_HTTPS_PORT does not change Caddy's local listener. HTTP/3 Alt-Svc advertises
+the configured public port, which must match for TCP and UDP. A TCP-only mapping
+allows HTTP/1.1/2 but not HTTP/3.
+
+HTTPS/SVCB records are optional. A supporting DNS provider can advertise HTTP/3;
+its port parameter must match PUBLIC_HTTPS_PORT. Without these records, browsers
+can discover HTTP/3 through Alt-Svc on an HTTPS response. WebRTC also requires
+UDP/TCP 8189 as described in FIREWALL.txt. HTTPS DNS records and Alt-Svc do not
+replace the routing/NAT configuration for that media port.

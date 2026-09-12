@@ -1,3 +1,9 @@
+//go:build ignore
+
+// This integration publisher is copied into a matching MediaMTX source tree
+// before `go run`; it imports MediaMTX internal packages and is intentionally
+// excluded from the release module's normal `go test ./...` package scan.
+
 package main
 
 import (
@@ -9,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/pion/rtp"
@@ -254,7 +261,15 @@ func (p *obsAV1Packetizer) packetize(temporalUnit []byte) ([]*rtp.Packet, error)
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 3 {
-		panic("usage: r8-obs-aom-whip-publisher <aom-av1.ivf> [proper-extension|no-repeat-sequence]")
+		panic("usage: WHIP_URL=... WHIP_BEARER_TOKEN=... obs-aom-whip-publisher <aom-av1.ivf> [proper-extension|no-repeat-sequence]")
+	}
+	whipURL := os.Getenv("WHIP_URL")
+	if whipURL == "" {
+		panic("WHIP_URL is required")
+	}
+	whipBearerToken := os.Getenv("WHIP_BEARER_TOKEN")
+	if whipBearerToken == "" {
+		panic("WHIP_BEARER_TOKEN is required")
 	}
 	frames, err := readIVF(os.Args[1])
 	if err != nil {
@@ -270,21 +285,32 @@ func main() {
 		panic("unknown packetization mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	testDuration := 60 * time.Second
+	if rawDuration := os.Getenv("WHIP_TEST_DURATION_SECONDS"); rawDuration != "" {
+		seconds, err := strconv.Atoi(rawDuration)
+		if err != nil || seconds < 10 || seconds > 600 {
+			panic("WHIP_TEST_DURATION_SECONDS must be an integer from 10 through 600")
+		}
+		testDuration = time.Duration(seconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
 	defer cancel()
 
 	videoTrack := &webrtc.OutboundTrack{Caps: pwebrtc.RTPCodecCapability{
 		MimeType: pwebrtc.MimeTypeAV1, ClockRate: 90000,
 	}}
 	audioTrack := &webrtc.OutboundTrack{Caps: pwebrtc.RTPCodecCapability{
-		MimeType: pwebrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
+		MimeType:    pwebrtc.MimeTypeOpus,
+		ClockRate:   48000,
+		Channels:    2,
+		SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1",
 	}}
 	publisher := &whip.Client{
-		URL:            mustURL("http://127.0.0.1:18889/live/whip"),
+		URL:            mustURL(whipURL),
 		Publish:        true,
 		OutboundTracks: []*webrtc.OutboundTrack{videoTrack, audioTrack},
 		HTTPClient:     &http.Client{Timeout: 20 * time.Second},
-		BearerToken:    "obs:testpass",
+		BearerToken:    whipBearerToken,
 		Log:            quietLogger{},
 	}
 	if err := publisher.Initialize(ctx); err != nil {

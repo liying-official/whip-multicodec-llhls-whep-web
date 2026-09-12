@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+DIAG_RESULT=0
 PUBLIC_DOMAIN=
 PUBLIC_HTTPS_PORT=443
 TLS_CERT=certs/fullchain.pem
@@ -70,11 +71,21 @@ fi
 [ -n "$WHIP_IP" ] || WHIP_IP=$(hostname -I 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}' || true)
 [ -n "$WHIP_IP" ] || WHIP_IP=127.0.0.1
 case "$(uname -m)" in
-  x86_64|amd64) HELPER="$ROOT/bin/helper_linux_amd64" ;;
-  aarch64|arm64) HELPER="$ROOT/bin/helper_linux_arm64" ;;
+  x86_64|amd64)
+    HELPER="$ROOT/bin/helper_linux_amd64"
+    MEDIAMTX="$ROOT/bin/mediamtx_linux_amd64"
+    CADDY="$ROOT/bin/caddy_linux_amd64"
+    ;;
+  aarch64|arm64)
+    HELPER="$ROOT/bin/helper_linux_arm64"
+    MEDIAMTX="$ROOT/bin/mediamtx_linux_arm64"
+    CADDY="$ROOT/bin/caddy_linux_arm64"
+    ;;
   *) echo "unsupported architecture"; exit 1 ;;
 esac
-"$ROOT/status.sh" || true
+if ! "$ROOT/status.sh"; then
+  DIAG_RESULT=1
+fi
 printf '\n公网 Web: %s/\n' "$PUBLIC_ORIGIN"
 printf 'Playlist: %s/live/index.m3u8\n' "$PUBLIC_ORIGIN"
 printf 'OBS WHIP: http://%s:8889/live/whip\n' "$WHIP_IP"
@@ -86,6 +97,7 @@ if [ "$PUBLIC_HTTPS_PORT_VALID" -eq 1 ]; then
   printf '公网端口映射: TCP/UDP %s -> 本机 TCP/UDP 443；Alt-Svc 应通告 h3=\":%s\"\n' "$PUBLIC_HTTPS_PORT" "$PUBLIC_HTTPS_PORT"
 else
   printf '公网端口映射: FAIL - PUBLIC_HTTPS_PORT 必须是 1～65535 且无前导零\n'
+  DIAG_RESULT=1
 fi
 if [ -n "${PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
   host_a=$(getent ahostsv4 "$PUBLIC_HOST" 2>/dev/null | awk 'NF > 0 && !seen[$1]++ { if (out != "") out=out ","; out=out $1 } END { print out }' || true)
@@ -93,36 +105,61 @@ if [ -n "${PUBLIC_HOST:-}" ] && command -v getent >/dev/null 2>&1; then
   printf 'WebRTC PUBLIC_HOST: %s (A: %s; AAAA: %s)\n' "$PUBLIC_HOST" "${host_a:-UNRESOLVED}" "${host_aaaa:-none}"
   if [ -z "$host_a" ]; then
     echo 'WebRTC PUBLIC_HOST: FAIL - 没有 IPv4 A 记录'
+    DIAG_RESULT=1
   elif [ -n "$host_aaaa" ]; then
     echo 'WebRTC PUBLIC_HOST: FAIL - 检测到 AAAA；IPv4-only ICE 部署要求使用无 AAAA 的 PUBLIC_HOST'
+    DIAG_RESULT=1
+  elif host_approved=$("$HELPER" public-ips --value "$host_a" 2>/dev/null); then
+    printf 'WebRTC PUBLIC_HOST: PASS - 启动候选均为公网 IPv4；WHEP 精确白名单=%s\n' "$host_approved"
   else
-    echo 'WebRTC PUBLIC_HOST: PASS - A-only DDNS hostname'
+    echo 'WebRTC PUBLIC_HOST: FAIL - A 记录包含私网、保留或其他不可公开路由的 IPv4'
+    DIAG_RESULT=1
   fi
+else
+  echo 'WebRTC PUBLIC_HOST: FAIL - 未配置 PUBLIC_HOST 或系统缺少 getent'
+  DIAG_RESULT=1
 fi
 printf '音频: WHIP/WHEP 使用 Opus；RTMP/AAC 请使用 LL-HLS；网页需点“开启声音”。\n'
-if grep -q 'BEGIN R33 WHEP OPUS STEREO' "$ROOT/web/app.js" \
+if grep -q 'BEGIN V1.35 WHEP OPUS STEREO' "$ROOT/web/app.js" \
   && grep -q 'sprop-stereo=1' "$ROOT/web/app.js"; then
   echo 'WHEP Opus 立体声协商: PASS - offer stereo=1 / answer stereo=1;sprop-stereo=1'
 else
-  echo 'WHEP Opus 立体声协商: FAIL - web/app.js 缺少 R33 stereo SDP 修复'
+  echo 'WHEP Opus 立体声协商: FAIL - web/app.js 缺少 V1.35 stereo SDP 修复'
+  DIAG_RESULT=1
 fi
 printf 'DNS: PUBLIC_DOMAIN 可使用 A/AAAA；PUBLIC_HOST 必须 A-only；HTTPS/SVCB RR 为可选 HTTP/3 优化。\n\n'
-if [ -x "$ROOT/bin/mediamtx" ]; then
+if [ -x "$MEDIAMTX" ]; then
   printf 'MediaMTX: '
-  "$ROOT/bin/mediamtx" --version 2>/dev/null || echo '(version query failed)'
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$ROOT/bin/mediamtx"
+  if ! "$MEDIAMTX" --version 2>/dev/null; then
+    echo '(version query failed)'
+    DIAG_RESULT=1
   fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$MEDIAMTX"
+  fi
+else
+  echo 'MediaMTX: FAIL - 当前架构二进制缺失或不可执行'
+  DIAG_RESULT=1
 fi
 if [ -n "${PUBLIC_DOMAIN:-}" ]; then
   cert=${TLS_CERT:-certs/fullchain.pem}; key=${TLS_KEY:-certs/privkey.pem}
   case "$cert" in /*) ;; *) cert="$ROOT/$cert" ;; esac
   case "$key" in /*) ;; *) key="$ROOT/$key" ;; esac
-  "$HELPER" check-cert --cert "$cert" --key "$key" --domain "$PUBLIC_DOMAIN" || true
+  if ! "$HELPER" check-cert --cert "$cert" --key "$key" --domain "$PUBLIC_DOMAIN"; then
+    DIAG_RESULT=1
+  fi
+else
+  echo 'TLS certificate: FAIL - PUBLIC_DOMAIN 未配置'
+  DIAG_RESULT=1
 fi
-if [ -x "$ROOT/bin/caddy" ] && [ -f "$ROOT/runtime/Caddyfile" ]; then
+if [ -x "$CADDY" ] && [ -f "$ROOT/runtime/Caddyfile" ]; then
   printf '\n--- Caddy validate ---\n'
-  "$ROOT/bin/caddy" validate --config "$ROOT/runtime/Caddyfile" --adapter caddyfile || true
+  if ! "$CADDY" validate --config "$ROOT/runtime/Caddyfile" --adapter caddyfile; then
+    DIAG_RESULT=1
+  fi
+else
+  echo 'Caddy validate: FAIL - 二进制或 runtime/Caddyfile 缺失'
+  DIAG_RESULT=1
 fi
 printf '\n--- HTTP/3 UDP socket buffer ---\n'
 if command -v sysctl >/dev/null 2>&1; then
@@ -170,6 +207,7 @@ fi
 if command -v ss >/dev/null 2>&1; then
   if ss -H -lnt 2>/dev/null | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\*|\[::\]):(8889|1935)[[:space:]]'; then
     echo 'SECURITY: FAIL - TCP/8889 或 TCP/1935 正在 wildcard 地址监听'
+    DIAG_RESULT=1
   else
     echo 'SECURITY: PASS - 发布控制端口未使用 wildcard 监听'
   fi
@@ -199,3 +237,4 @@ if [ -f "$ROOT/logs/mediamtx.log" ]; then
   restarts=$(grep -c 'SUPERVISOR MediaMTX exited' "$ROOT/logs/mediamtx.log" 2>/dev/null || true)
   echo "Unexpected MediaMTX exits observed in current log: ${restarts:-0}"
 fi
+exit "$DIAG_RESULT"

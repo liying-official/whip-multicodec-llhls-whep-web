@@ -1,377 +1,310 @@
-OBS WHIP 多编码直播服务器 - Debian 13 TLS 1.3 公网兼容版
-==========================================================
+OBS WHIP 多编码 LL-HLS/WHEP 直播边缘
+-----------------------------
 
-公网播放架构：
+English: README.en.md | 简体中文: README.md
 
-OBS
-  | 首选：HTTP WHIP 信令 -> 私有网卡 IPv4:8889
-  |       WebRTC 媒体 -> DTLS-SRTP / UDP/TCP 8189
-  | 兼容：RTMP -> 私有网卡 IPv4:1935
-  | 发布同时要求随机密码 + RFC1918 来源 CIDR
-  v
-MediaMTX
-  | H.264 / HEVC(H.265) / AV1 / VP9
-  | WHIP 音频通常为 Opus；RTMP 音频通常为 AAC
-  | 零视频转码
-  | H.264 / HEVC：Low-Latency HLS，约 5 秒播放安全缓存
-  | AV1 / VP9：浏览器支持 MSE 时优先 LL-HLS，否则 WHEP / WebRTC
-  | WHEP 信令：私有网卡 IPv4:8889
-  v
-HLS 127.0.0.1:8888 + WHEP 私网 8889
-  v
-内部 Web/HLS/WHEP 安全网关 127.0.0.1:8080
-  v
-Caddy 安全边缘
-  | 本机 TCP/443：HTTP/1.1 + HTTP/2
-  | 本机 UDP/443：HTTP/3 / QUIC
-  | 公网 TCP/UDP PUBLIC_HTTPS_PORT 同时映射到本机 443
-  | TLS 1.3 ONLY
-  v
-https://你的域名[:PUBLIC_HTTPS_PORT]/
+低延迟、零视频转码直播服务。OBS 通过可信局域网使用
+WHIP 或 RTMP 发布，浏览器通过公网 TLS 1.3 使用 LL-HLS 或 WHEP/WebRTC 播放。
 
-兼容性策略
-----------
-本版本不再强制 QUIC-only。
-
-支持：
-  本机 TCP/443  -> HTTP/1.1 / HTTP/2 -> TLS 1.3
-  本机 UDP/443  -> HTTP/3 / QUIC     -> TLS 1.3
-  公网 TCP/UDP PUBLIC_HTTPS_PORT -> 本机同协议 443
-
-因此：
-- 支持 HTTP/3 的浏览器可以使用 QUIC。
-- QUIC 被网络阻断时，可以回退到同一公网端口的 TCP HTTP/2 或 HTTP/1.1。
-- 不允许 TLS 1.2 或更旧 TLS 版本。
-- 不开放明文 HTTP/80。
+当前版本：v1.35
 
 主要特性
 --------
-- Debian 13 amd64 / arm64 自动识别
-- H.264 / HEVC / AV1 / VP9 零视频转码
-- WHIP/WHEP Opus 音频；RTMP/AAC 由 LL-HLS 保留
-- WHEP Opus 显式协商 `stereo=1;sprop-stereo=1`，避免 Chromium 将双声道按单声道播放
-- WHIP 首帧等待提高到 15 秒，适配软件 x264 / SVT-AV1 启动延迟
-- RTMP/1935 软件编码器兼容入口
-- 随附 MediaMTX v1.19.3-r8：修复 AOM AV1 Enhanced RTMP 空 sequence-start，并归一化 OBS/libdatachannel 的 AV1 OBU
-- 后台进程自检等待 fork/exec 完成，避免 Caddy 尚未写日志时被误判为启动失败
-- AV1 / VP9 自动在 LL-HLS 与同源 WHEP 间选择，兼顾 AAC 声音与浏览器解码能力
-- HLS 主清单连续返回 HTTP 5xx 时自动改走 WHEP，不再无限停留在 manifestLoadError
-- 每次新建 WHEP 会话前重新读取当前 HLS 编码；OBS 不同编码热切换后无需刷新页面即可更新标签与能力判断
-- 自动模式无直播时按 5/10/20/30/60 秒退避探测，不再每约 9 秒持续新建 HLS session
-- WHEP 把分离到达的音频/视频轨合并为同一个播放流，避免后到轨道覆盖先到轨道
-- 网页显式“开启声音”按钮，并诊断静音、缺少音频轨和 AAC/WHEP 不兼容
-- WHEP 会话 Location 重写及页面切换/关闭时的 DELETE 清理
-- 公网 WHEP 按真实来源 IP 限制：10 次创建/10 秒、30 次创建/分钟、最多 5 个活动会话
-- WHEP create 在计入任何配额前强制 MIME `application/sdp`；HTML form/text/plain 跨站 POST 返回 415 且不消耗限流额度
-- 活动 WHEP 会话绑定创建者 IP，并使用 60 秒心跳 + 5 分钟僵尸计数回收
-- MediaMTX 原始 WHEP 错误不再返回观众；编码不支持通过安全错误分类继续触发 LL-HLS fallback
-- MediaMTX HLS 4xx/5xx 原始正文也在 loopback helper 层清洗；只保留状态码和固定安全文案
-- /hls.min.js 使用 `public, max-age=0, must-revalidate`，浏览器可缓存但每次会重新验证，依赖安全更新可立即生效
-- 播放器显示网络、编码器、MSE 和 WebRTC 错误，不再静默黑屏
-- 正常网络约 5 秒目标直播缓存；持续低缓冲/低吞吐时自动切换约 8 秒弱网稳定缓冲模式
-- 弱网检测带 8 秒起播预热，避免把首次 waiting 误判为网络故障；恢复稳定后再自动退出弱网模式
-- HLS 服务端使用约 2 秒媒体段和 1 秒 CMAF part，并保留 24 个媒体段，为短时断网/抖动恢复提供更大的追赶窗口
-- LL-HLS / WHEP 双路径音画同步保护，弱网恢复后自动校正持续 A/V 漂移
-- Web/HLS/WHEP 信令统一使用 PUBLIC_HTTPS_PORT；默认 443，也支持公网非标准端口
-- HTTP/3 Alt-Svc 使用 PUBLIC_HTTPS_PORT，不再错误通告服务器内网监听端口
-- HTTP/1.1 + HTTP/2 + HTTP/3
-- TLS 只允许 TLS 1.3
-- QUIC 0-RTT disabled
-- Host/SNI 严格一致性检查（handler-level 421；不泄漏 Server/Via）
-- HSTS / CSP / X-Frame-Options / nosniff / Referrer-Policy
-- Permissions-Policy / COOP / CORP
-- 413 等 Caddy error route 与正常响应使用同一组完整安全头
-- 网页无 inline JavaScript/CSS，CSP 不需要 unsafe-inline
-- 公网路径白名单：只暴露播放器文件和 /live/*
-- 后端 8080、8888 只绑定 loopback
-- 内部网关对 Web/HLS 只接受 GET/HEAD；WHEP 仅接受受控 POST/PATCH/DELETE/心跳，请求头上限 16 KiB
-- 基础每 IP 请求频率保护
-- MediaMTX HLS CORS 通配符关闭
-- 手工启动每次轮换 128-bit OBS 推流码；systemd 故障重启复用 root-only 凭据
-- OBS WHIP 地址在启动时自动选择已启用的 RFC1918 网卡，优先使用默认路由私网地址
-- WHIP/8889 与 RTMP/1935 只绑定识别出的 WHIP_IP，不使用 wildcard 监听
-- PUBLIC_HOST 为必填 A-only DNS 域名；启动前验证域名格式、IPv4 A 记录并拒绝原生 IPv6/AAAA，支持动态公网 IPv4/DDNS
-- 发布白名单强制生成为该网卡的真实局域网段 + WHIP_IP/32 本机地址
-- 发布账号同时校验随机密码和自动生成的来源白名单
-- config.env 严格按数据解析，不作为 root shell 代码执行
-- 公网 WHEP 创建只允许 POST；会话控制仅允许 PATCH/DELETE，播放器心跳使用带专用头的 POST；请求体上限 256 KiB
-- WHEP 创建必须是 `Content-Type: application/sdp`（允许合法 MIME 参数）；其他类型在限流计数前直接 415
-- WHEP 创建采用滚动窗口：单 IP 10 次/10 秒、30 次/60 秒；同时最多 5 个活动会话
-- 可选 systemd 管理器支持开机启动和 Caddy/Gateway 进程退出后的整组重启；沙箱允许自动网卡探测所需的 AF_NETLINK；凭据存放于 root-only 文件且不写 journal
 
-DNS
----
-现在不再要求 HTTPS/SVCB RR。
+- H.264、H.265/HEVC、AV1、VP9 零视频转码
+- WHIP/WHEP + Opus；RTMP + AAC/LL-HLS
+- WHEP 显式协商 Opus stereo=1;sprop-stereo=1，保持 Chromium 左右声道播放
+- LL-HLS 与 WHEP 自动能力检测、回退和编码热切换
+- LL-HLS 区分带宽/丢包与RTT弱网，使用12s目标延迟和实际8s/6s缓冲READY迟滞；只有RTT类改用完整媒体段
+- hls.js 1.7.3 的 SourceBuffer 写入超时、停滞清单检测及自动 MediaSource 重建用于弱网故障恢复；追回速度始终不超过 1.05x
+- HTTP/1.1、HTTP/2、HTTP/3；仅允许 TLS 1.3，禁用 QUIC 0-RTT
+- 支持 PUBLIC_HTTPS_PORT，公网 TCP/UDP 非标准端口可同时映射到本机 443
+- WHIP/8889 与 RTMP/1935 只绑定启动时识别的 RFC1918 私网网卡
+- 发布同时校验随机密码、接口真实局域网段和服务器本机 /32
+- WHEP MIME、请求体、速率、活动会话、来源 IP 和心跳保护
+- 公网 WHEP SDP 仅保留已验证的 PUBLIC_HOST IPv4 ICE 候选；可信本地 IPv4 请求可额外获得精确 WHIP_IP 候选，无允许候选时失败关闭
+- 匿名 Web/HLS 路径会移除浏览器认证头和无关 Cookie；上游错误正文不进入页面或浏览器日志
+- Host authority（含公网端口）/SNI 严格校验，正常及错误响应使用一致的安全头并移除 Server/Via
+- 可选 systemd 服务、只读程序树、强化进程沙箱、自动恢复和 root-only 持久发布凭据
+- Linux amd64 与 arm64 完整运行包
 
-最基础只需要：
+v1.35 固定使用：
 
-  live.example.com. 300 IN A 203.0.113.10
+- MediaMTX v1.21.0-r11，在 v1.21.0 安全基线上重放并回归 AOM AV1 RTMP/WHIP/HLS 兼容修复
+- Caddy v2.11.4-V1.35-go1.27.1-fix8v9，使用固定源码提交和模块图构建
+- helper、MediaMTX 与 Caddy 均使用 Go 1.27.1 构建
+- hls.js v1.7.3，随包提供并校验 npm 签名/provenance，不在启动时从网络下载
 
-PUBLIC_DOMAIN 如需 IPv6 可增加 AAAA；PUBLIC_HOST 必须保持 A-only。
-
-如果 DNS 服务商支持 HTTPS/SVCB RR，可以额外发布 h3 能力，用于让支持的
-客户端更快尝试 HTTP/3；非标准公网端口时 RR 的 port 参数必须与
-PUBLIC_HTTPS_PORT 一致。即使没有该记录，浏览器仍可从正确的 Alt-Svc 通告发现 h3。
-
-TLS 证书
+数据链路
 --------
-请准备公网可信 PEM：
-
-  certs/fullchain.pem
-  certs/privkey.pem
-
-以上是项目目录内的通用相对默认路径；也可在 config.env 中改为管理员维护的
-其他证书和私钥路径。发布包不包含实际证书或私钥。
-
-start.sh 会检查：
-- 证书与私钥匹配
-- 证书尚未过期
-- 剩余有效期至少 24 小时
-- SAN 覆盖 PUBLIC_DOMAIN
-
-TLS 协议被固定为：
-
-  Min TLS = 1.3
-  Max TLS = 1.3
-
-因此 TLS 1.2 客户端会被拒绝。
-
-配置
-----
-编辑 config.env：
-
-  PUBLIC_DOMAIN=live.example.com
-  PUBLIC_HTTPS_PORT=443
-  TLS_CERT=certs/fullchain.pem
-  TLS_KEY=certs/privkey.pem
-  WHIP_IP=
-  PUBLIC_HOST=live.example.com
-  INGEST_ALLOW_CIDRS=
-
-PUBLIC_HTTPS_PORT 是观众实际访问的公网端口，不是 Caddy 本机监听端口。默认 443；
-如果路由器使用非标准公网端口映射到服务器 443，则必须填写实际公网端口：
-
-  PUBLIC_HTTPS_PORT=<PUBLIC_HTTPS_PORT>
-
-并同时配置 TCP/<PUBLIC_HTTPS_PORT> -> TCP/443 与
-UDP/<PUBLIC_HTTPS_PORT> -> UDP/443。启动信息、诊断 URL、WHEP URL 和 HTTP/3
-Alt-Svc 都会使用该端口。只映射 TCP 会保留 HTTP/1.1/2，但 HTTP/3 必然不可用。
-
-WHIP_IP 留空时，start.sh 会扫描已启用网卡，优先选择默认路由对应的 RFC1918
-本机地址；多网卡服务器仍可用 WHIP_IP 明确选择某个本机私网地址。程序读取该
-网卡的真实掩码，并在每次启动时把发布白名单强制生成为“接口局域网段 +
-WHIP_IP/32 本机地址”。旧版 INGEST_ALLOW_CIDRS 手工值会被忽略，不能扩大范围。
-无法找到私网网卡、指定公网地址或无法读取掩码时，启动会失败关闭。config.env
-只接受文档列出的 KEY=VALUE，不执行 shell。
-
-PUBLIC_HOST 现在为必填项，必须填写公网 DNS 域名，例如：
-
-  PUBLIC_HOST=live.example.com
-
-不要填写 http:// / https://、端口或裸 IPv4/IPv6 地址。公网 IPv4 可以动态变化；
-只要 DDNS 持续更新该域名的 IPv4 A 记录即可。PUBLIC_HOST 不允许 AAAA；主站需要 IPv6 时请使用独立 A-only WebRTC 子域名。start.sh 会在启动前验证 PUBLIC_HOST
-非空、域名格式合法，并且当前至少能解析出一个 IPv4 A 记录；任一条件不满足都会
-直接拒绝启动，以免 WHEP 生成不可用的公网 ICE candidate。
-
-安装目录安全要求
---------------------
-start.sh 会以 root 执行包内 helper、MediaMTX 和 Caddy。为防止普通本地用户在
-启动前替换这些文件，项目目录、所有父目录、关键脚本/模板以及 bin/web/src/third_party
-必须由 root 所有，并且 group/other 不可写。推荐部署到 /opt，例如：
-
-  sudo cp -a <解压后的项目目录> /opt/obs-whip-live-r33
-  sudo chown -R root:root /opt/obs-whip-live-r33
-  sudo chmod go-w /opt/obs-whip-live-r33
-
-从 /tmp、普通用户可写的下载目录或其他不可信父目录直接 sudo ./start.sh 会被安全拒绝。
-证书路径仍可按 config.env 指向管理员管理的位置。
-
-启动
-----
-
-手工启动（每次启动轮换推流码）：
-
-  sudo ./start.sh
-
-本包已经随附并固定使用：
-- MediaMTX v1.19.3-r8（amd64 / arm64；AOM AV1 RTMP + WHIP/HLS 修补构建）
-- Caddy v2.11.4-r33-go1.26.5（amd64 / arm64；固定源码提交、模块清单和可复现构建）
-- hls.js v1.6.16
-
-启动过程不下载 Caddy 或 hls.js，避免外网/上游服务不可用时阻塞。Caddy 随包
-二进制、许可证、精确 go.mod/go.sum 与构建说明见 third_party/；hls.js 的
-许可证和 npm SHA-512 完整性验证记录也保存在 third_party/。
-
-可选 systemd 开机启动
----------------------
-先按上面的安全要求安装到 /opt 或 /usr/local、填写 config.env，再执行：
-
-  sudo ./install-systemd.sh
-
-安装器会创建并启用 `obs-whip-live.service`。服务模式首次启动生成 root-only
-`runtime/publish.credentials`，后续自动重启复用同一凭据，避免无人值守重启使
-OBS 立刻失效；凭据不会输出到 journal。查看凭据：
-
-  sudo ./show-credentials.sh
-
-查看日志与状态：
-
-  sudo systemctl status obs-whip-live.service
-  sudo journalctl -u obs-whip-live.service
-
-systemd 管理器监测 MediaMTX supervisor、Gateway 和 Caddy；unit 已允许
-AF_NETLINK，以便 WHIP_IP 留空时 iproute2 能在沙箱内探测默认路由和网卡。Gateway/Caddy
-意外退出时让 systemd 整组重启。手工 `stop.sh` 默认仍删除持久凭据并使其失效；
-unit 运行时 `stop.sh` 会先正确停止 unit 再删除凭据。start.sh 会拒绝与活动 unit
-并行启动。
-
 OBS
----
-WHIP（首选，地址只使用网卡 IP，不需要域名）：
+ ├─ WHIP / WebRTC ─┐
+ └─ RTMP ──────────┤
+                    ▼
+          patched MediaMTX
+            ├─ LL-HLS ── secure gateway ── Caddy ── Browser
+            └─ WHEP signaling ─ secure gateway ── Caddy ── Browser
+                 WebRTC media (DTLS-SRTP) ─────────────── Browser
 
-  服务：WHIP
-  Server：http://<LAN_IP>:8889/live/whip
-  Bearer Token：start.sh 显示的 obs:<随机推流码>
+服务器不转码。浏览器必须能够解码 OBS 当前输出的编码；H.264 通常具有最广泛的
+兼容性。AOM AV1 的关键帧间隔必须设置为 1～2 秒，不能使用 0/自动。
 
-TCP/8889 只在启动识别出的 WHIP_IP 上监听；来源地址只能属于该网卡的实际
-局域网段或服务器本机 /32。即使上游防火墙误开放端口，公网来源也不能只凭
-密码发布。
-
-如果 x264 / SVT-AV1 在 WHIP 下仍因编码器重排或负载断开，改用兼容入口：
-
-  服务：自定义
-  Server：rtmp://<LAN_IP>:1935
-  Stream key：live?user=obs&pass=<start.sh 显示的随机推流码>
-
-注意：RTMP 的 Stream key 只填 live?user=obs&pass=...，不加 obs:。
-
-建议配置：
-
-  x264：
-    CBR，关键帧间隔 1～2 秒，B 帧 0，repeat headers，
-    preset veryfast 或更快，tune zerolatency。
-
-  SVT-AV1（WHIP）：
-    必须使用 CBR，使 OBS 进入 low-delay P 预测结构；
-    关键帧间隔 1～2 秒，8-bit 4:2:0。
-
-  AOM AV1：
-    CBR，关键帧间隔 1～2 秒，8-bit 4:2:0。
-    关键帧间隔不能使用 0/自动；HLS/CMAF 必须定期收到 KEY_FRAME 才能切段。
-    网页“自动”模式会检测 av01：浏览器声明支持 MSE AV1 时先使用 LL-HLS；
-    若清单连续返回 HTTP 5xx 或无法形成画面，会自动切到 WebRTC / WHEP。
-
-软件编码器首次排障建议从 1920x1080、30 FPS 开始。若 OBS 日志出现
-“Encoding queue duration surpassed 5 seconds”，是本机编码器过载，应降低分辨率/
-帧率或使用更快 preset；服务器无法修复本机来不及编码的问题。
-
-完整参数和故障对应关系见 OBS-COMPATIBILITY.txt。
-
-公网播放
+快速部署
 --------
 
-标准端口：
+代码已在 Debian 13 / Ubuntu 26.04 环境下测试通过；其他兼容的 Linux 发行版可自行测试部署。
+运行包包含 Linux amd64 / arm64 二进制，启动脚本按 CPU 架构选择。需要 root 权限、
+系统 CA 信任库、iproute2（ip / ss）、getent、GNU coreutils（含 timeout、
+sha256sum）、常用 shell 工具和 tar / gzip；服务安装还需要运行中的 systemd、
+systemd-analyze、systemd-notify、systemctl 和 flock。使用预编译包无需安装 Go。
 
-  https://live.example.com/
+1. 从 GitHub Releases（https://github.com/liying-official/obs-whip-multicodec-llhls-web/releases）
+   下载 v1.35 完整运行包及同一发布提供的 .sha256 文件。以下命令使用本次交付的规范文件名；
+   文件名中的平台与构建标签不表示发行版兼容范围。
+2. 在下载目录执行下列命令。此流程仅适用于 /opt/obs-whip-live 不存在的首次安装；
+   已有部署使用后面的“卸载与重装”流程。目录已存在时 mkdir 会失败，不能继续覆盖解压。
+   set -eu
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+   sha256sum -c "$archive.sha256"
+   sudo mkdir -m 0755 /opt/obs-whip-live
+   sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
+   cd /opt/obs-whip-live
+   sudo sha256sum -c SHA256SUMS
 
-非标准端口：
+   包内 SHA256SUMS 应在修改配置前全部通过。解压使用包内 root 所有权与文件权限；
+   项目和所有父目录必须由 root 管理、不能被组或其他用户写入，项目路径不能含符号链接。
+   不要从 /tmp 或普通用户可写的下载目录直接运行 root 启动脚本。
+3. 在 /opt/obs-whip-live 中执行 sudoedit config.env，逐项核对并替换为自己的环境：
+   PUBLIC_DOMAIN=live.example.com
+   PUBLIC_HTTPS_PORT=443
+   TLS_CERT=certs/fullchain.pem
+   TLS_KEY=certs/privkey.pem
+   WHIP_IP=
+   INGEST_ALLOW_CIDRS=
+   PUBLIC_HOST=rtc.example.com
 
-  https://live.example.com:<PUBLIC_HTTPS_PORT>/
+   包内 config.env 是未配置模板：站点域名、WebRTC 域名和网卡地址留空，
+   HTTPS 公网端口默认为 443。必须先填写自己的 PUBLIC_DOMAIN 和 PUBLIC_HOST；
+   未配置时安装器和启动脚本会拒绝运行。上述域名仅为部署示例。
+   WHIP_IP 留空时，优先选择默认路由对应的已启用 RFC1918 私网地址；也可明确选择
+   本机私网网卡。发布来源固定为该接口实际局域网段和本机 WHIP_IP/32，
+   INGEST_ALLOW_CIDRS 是兼容配置键，其手工值不会扩大发布范围。
 
-Playlist：
+   PUBLIC_DOMAIN 是播放站点域名，可按实际网络配置 A / AAAA。
+   PUBLIC_HOST 必须为 A-only DNS 域名，有 1～16 个可公开路由的 IPv4 A 记录，
+   不允许裸 IP、协议、端口或原生 IPv6 / AAAA。启动时验证过的全部 A 记录构成该进程
+   的公网 WHEP ICE 精确白名单，DNS 后续变化需重启服务更新。公网请求者只获得这组候选；
+   真实来源为私网、回环或链路本地 IPv4 的请求者还可获得已配置的精确 WHIP_IP 候选。
+   其他地址、IPv6、mDNS 和畸形候选被过滤，无允许候选时失败关闭。
+4. 将自己的 PEM 完整证书链和私钥放到配置路径。发布包不包含真实证书或私钥。
+   私钥最终目标必须为 root 所有且不向组或其他用户开放，推荐 root:root 0600；
+   配置路径及解析后目标的父目录链均须 root 管理、不可被组或其他用户写入。
+   启动会校验证书/私钥匹配、系统信任链、PUBLIC_DOMAIN、ServerAuth 用途及至少
+   24 小时剩余有效期。Caddy 不自动签发证书；更新证书后须重启服务。
+5. 完成配置和证书准备后，在项目目录安装服务：
+   sudo ./install-systemd.sh --check-only
+   sudo ./install-systemd.sh
+   sudo systemctl status obs-whip-live.service
+   sudo ./show-credentials.sh
 
-  https://live.example.com[:PUBLIC_HTTPS_PORT]/live/index.m3u8
+   --check-only 检查路径/所有权/权限、关键文件和清单存在性、必填配置，
+   不写 unit、不要求 systemd 为 PID 1，也不执行完整内容哈希或运行时验收。
+   正式安装才会严格核验全部受管文件的 SHA-256（可编辑的 config.env 内容除外），
+   验证 unit 并启用服务。程序先完成真实启动检查才发送 systemd 就绪通知，安装器随后
+   观察 152 秒稳定性；核心进程存活本身不足以算通过。DNS 查询和重试共享 30 秒总时限，
+   无法确认 A-only 条件或超时均拒绝启动。
 
-浏览器还必须能够解码 OBS 当前推送的视频编码。
-H.264 兼容性通常最好；HEVC / AV1 / VP9 取决于浏览器、系统和设备能力。
+服务模式首次启动把发布凭据保存在 root-only 的 runtime/publish.credentials，
+后续重启复用，凭据不写入 journal。也可使用 sudo ./start.sh 手工运行：已有持久
+凭据时复用；没有持久文件时只生成内存中的临时凭据。活动 unit 存在时拒绝并行手工启动。
+服务将项目程序树设为只读，仅 logs/、runtime/ 可写，启用进程、命名空间和文件系统
+隔离；网关或 Caddy 意外退出时由 systemd 重启整组服务。
 
-播放器默认使用“自动”：
-- 先从实际 HLS 主清单读取当前视频编码/profile：H.264 / H.265(HEVC) / AV1 / VP9。
-- 对 LL-HLS 使用 MediaSource.isTypeSupported() + MediaCapabilities 检测。
-- 对 WHEP 使用 RTCRtpReceiver.getCapabilities() + MediaCapabilities 检测。
-- 自动模式优先选择浏览器明确支持的路径；LL-HLS 不支持而 WebRTC 支持时直接使用 WHEP。
-- 两条路径都明确不支持时停止尝试并提示当前设备/浏览器无法解码该编码。
-- 页面左上角显示当前编码、LL-HLS/WebRTC 支持状态、预计流畅性以及“硬件解码/软件解码”。
-- “硬件解码/软件解码”依据 MediaCapabilities.powerEfficient 推断，不代表驱动级确认。
-- HLS 连续返回 HTTP 5xx、AV1 / VP9 HLS 媒体错误或无画面时仍保留原有 WHEP 回退机制。
-- 弱网 LL-HLS：正常网络保持约 5 秒目标；持续低缓冲/吞吐不足时在真正饿死前进入约 8 秒稳定缓冲模式，并把最大前向缓冲提高到 16 秒、上限提高到 24 秒。
-- 弱网模式最高约 1.03x 温和追赶，正常模式最高 1.06x；只有严重落后且目标点已经缓冲时才跳回安全直播点。
-- HLS manifest/playlist/fragment 使用分级超时、指数退避和有限重试；短时断网恢复时重新靠近 live edge，避免长期追逐已经过期的 LL-HLS part。
-- 自动模式检测到尚无直播时不创建 hls.js 播放实例，而是按 5/10/20/30/60 秒退避重新获取主清单；流恢复或浏览器重新联网时立即探测。手动 LL-HLS 仍保留原始重试，便于诊断。
-- LL-HLS 显式启用音频时间戳重整、短视频轨延展和视频空洞 nudge，降低卡顿恢复后的音画漂移。
-- 弱网 WHEP：优先比较 audio/video estimatedPlayoutTimestamp 的相对基线变化；浏览器不提供时回退比较 jitter-buffer 延迟。
-- WHEP 只有持续多次明显 A/V 偏移才重建会话，并带 20 秒冷却，避免网络差时反复重连。
-- WHEP connectionState=disconnected 先给予 7 秒浏览器自恢复窗口；仍未恢复时按 3/5/8/12 秒退避重建，会话稳定 15 秒后清零退避级别。
-- 自动模式下 WHEP 连续恢复失败且 LL-HLS 可用时可切换到 LL-HLS 稳定路径；手动选择 WHEP 时保持用户选择并继续退避恢复。
-- 公网 WHEP 创建受单 IP 10/10 秒、30/60 秒和最多 5 个活动会话保护；超限返回 HTTP 429。
-- 活动会话每 60 秒向同源安全网关发送一次轻量心跳；5 分钟未刷新会自动释放本地计数。
-- MediaMTX 原始错误正文只在服务器侧分类，不显示给观众；播放器只显示友好错误。
-- HLS 4xx/5xx 也由 helper 改成固定安全正文，且 `Cache-Control: no-store`；2xx/3xx（包括 HLS cookie redirect）保持原行为。
-- 右上角可以手动切换“LL-HLS”或“WebRTC / WHEP”。
-- 自动播放按浏览器要求从静音开始；点击右上角“开启声音”恢复声音。
-- OBS 通过 WHIP 推送 AV1/VP9 + Opus 时，WHEP 可输出音频。
-- OBS 通过 RTMP 推送时音频通常为 AAC；WHEP 不传 AAC，播放器会明确提示并建议
-  切回 LL-HLS。服务器不做音频转码。
-- 若观众可用带宽长期低于源直播实际码率，且服务器不做 ABR/转码，则任何播放器都无法无限避免缓冲耗尽；本版优化的是提前增加安全缓冲、短时断网容忍与恢复速度。
-
-公网端口
+卸载与重装
 --------
-服务器本机监听：
 
-  443/TCP   HTTP/1.1 + HTTP/2 / TLS 1.3
-  443/UDP   HTTP/3 / QUIC / TLS 1.3
+sudo ./uninstall.sh 停止并移除服务，但保留整个项目目录（包括配置、证书和持久凭据）。
+sudo ./uninstall.sh --purge 会删除项目目录，不可用于保留数据的重装。
+卸载会核验 unit 归属、停止结果、MainPID / ControlPID 和 cgroup；无法确认完全停止，
+或 disable / reload 失败时返回非零并保留目录，删除后的 reload 失败会恢复 unit 文件。
 
-公网映射必须让两种协议使用同一个 PUBLIC_HTTPS_PORT：
+重装必须使用完整的新目录，不能把新包覆盖解压到卸载后保留的旧树。以下命令先校验
+新包、保留旧树，再恢复配置、证书和推流凭据。将 archive 改为实际新包的绝对路径；
+/opt/obs-whip-live-backup 必须不存在，已有备份时先另选未占用的备份目录并同步替换命令。
+外部证书路径继续由管理员维护。下例恢复整个 certs/ 后，会从已校验的新包重新提取
+受管的 certs/README.txt，避免旧文档破坏新包清单。若配置使用旧项目目录中 certs/
+以外的自定义证书路径，须在安装前单独恢复这些证书/私钥并核验所有权和权限；不要恢复
+旧代码、模板或其他受管文档。恢复配置后仍需确认域名、端口和网卡符合当前环境。
+set -eu
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix9.tar.gz'
+cd "$(dirname "$archive")"
+sha256sum -c "$(basename "$archive").sha256"
+sudo mkdir -m 0700 /opt/obs-whip-live-backup
+cd /opt/obs-whip-live
+sudo ./uninstall.sh
+cd /opt
+sudo mv /opt/obs-whip-live /opt/obs-whip-live-backup/project
+sudo mkdir -m 0755 /opt/obs-whip-live
+sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
+cd /opt/obs-whip-live
+sudo sha256sum -c SHA256SUMS
+sudo cp -a /opt/obs-whip-live-backup/project/config.env ./config.env
+sudo cp -a /opt/obs-whip-live-backup/project/certs/. ./certs/
+release_root=$(basename "$archive" .tar.gz)
+sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions "$release_root/certs/README.txt"
+if sudo test -f /opt/obs-whip-live-backup/project/runtime/publish.credentials; then
+  sudo mkdir -m 0700 runtime
+  sudo cp -p /opt/obs-whip-live-backup/project/runtime/publish.credentials runtime/publish.credentials
+fi
+sudoedit config.env
+sudo ./install-systemd.sh --check-only
+sudo ./install-systemd.sh
+sudo ./show-credentials.sh
 
-  PUBLIC_HTTPS_PORT/TCP -> 服务器 443/TCP
-  PUBLIC_HTTPS_PORT/UDP -> 服务器 443/UDP
+日常管理
+--------
 
-默认 PUBLIC_HTTPS_PORT=443。若填写其他端口，观众 URL 必须带
-`:<PUBLIC_HTTPS_PORT>`，Caddy 会通告相同端口的 HTTP/3 Alt-Svc；不能把公网
-TCP 与 UDP 映射到不同端口。
+所有命令均在 /opt/obs-whip-live 下执行：
+sudo ./status.sh
+sudo ./diagnose.sh
+sudo journalctl -u obs-whip-live.service
+sudo systemctl restart obs-whip-live.service
+sudo ./stop.sh
 
-不需要开放：
+status.sh / diagnose.sh 在核心进程、必需监听、TLS/Caddy 或公网 ICE 安全检查失败时
+返回非零。服务模式重启可重新加载证书和 DNS 候选，并保留发布凭据。手工模式更新
+证书后先 sudo ./stop.sh 再 sudo ./start.sh。stop.sh 默认保留持久凭据；
+主动轮换使用 sudo ./stop.sh --clear-credentials，它会先安全停止当前 unit，再删除旧凭据。
+服务模式随后用 sudo systemctl start obs-whip-live.service 启动并生成新凭据。
 
-  80/TCP
-  8080/TCP
-  8888/TCP
-  9998/TCP  MediaMTX metrics，仅监听 127.0.0.1，供监控读取
+OBS 参数
+--------
 
-OBS 发布控制通道（只允许启动时识别出的同网段局域网和服务器本机）：
+WHIP（推荐）：
+Server:       http://<LAN_IP>:8889/live/whip
+Bearer Token: obs:<show-credentials.sh 显示的随机密码>
 
-  8889/TCP  HTTP WHIP 信令，只绑定 WHIP_IP
-  1935/TCP  RTMP 兼容推流，只绑定 WHIP_IP
+RTMP 兼容入口（密码同 WHIP，Stream key 中不加 obs:）：
+Server:     rtmp://<LAN_IP>:1935
+Stream key: live?user=obs&pass=<随机密码>
 
-WebRTC 加密媒体（不是发布信令端口）：
+建议从 H.264、CBR、1～2 秒关键帧、关闭 B 帧开始验证。软件编码器首次排障建议使用
+1920×1080、30 FPS；服务器无法修复 OBS 本机编码队列过载。
 
-  8189/UDP  DTLS-SRTP 媒体
-  8189/TCP  DTLS-SRTP 媒体回退
+播放地址
+--------
 
-公网 WHEP 观众需要访问 8189；只使用 LL-HLS 时可以不向公网开放 8189。
+标准端口播放页为 https://live.example.com/；非标准端口为
+https://live.example.com:<PUBLIC_HTTPS_PORT>/。HLS 主清单路径为
+/live/index.m3u8，同源 WHEP 创建路径为 /rtc/live/whep；路径前均使用相同的
+HTTPS 域名及公网端口。WHEP 媒体单独通过 8189 传输，不经过 HTTPS 反向代理。
+页面默认先静音，点击“开启声音”恢复。WHIP/WHEP 音频使用 Opus；RTMP 通常为 AAC，
+要保留 AAC 声音请手动选择 LL-HLS。
 
-注意：网卡 IP 推流不使用 PUBLIC_DOMAIN。WHIP/8889 是明文 HTTP，RTMP/1935
-也是明文协议，凭据可能被同网段监听；仅用于启动识别出的可信局域网，程序本身会按启动时检测的局域网段和本机 /32 拒绝其他来源，防火墙仍应明确禁止公网访问。WebRTC 媒体通过 UDP/TCP 8189 上的 DTLS-SRTP 加密。
+网络端口
+--------
 
-管理
-----
-停止：
-  sudo ./stop.sh
+| 服务器本机监听 | 用途 | 暴露范围 |
+| --- | --- | --- |
+| TCP/443 | HTTPS、HTTP/1.1、HTTP/2 | 公网 |
+| UDP/443 | HTTP/3 / QUIC | 公网 |
+| UDP/TCP 8189 | WHEP WebRTC 加密媒体 | 使用 WHEP 时公网 |
+| TCP/8889 | OBS WHIP 信令 | 可信局域网 |
+| TCP/1935 | OBS RTMP 兼容推流 | 可信局域网 |
+| TCP/8080、8888、9998 | 内部网关、HLS、指标 | 仅 loopback |
 
-状态：
-  sudo ./status.sh
+如果公网使用非标准 HTTPS 端口，必须把同一个公网 TCP/UDP 端口映射到服务器
+TCP/UDP 443，并在 PUBLIC_HTTPS_PORT 中填写该公网端口。
+只开放 TCP 仍可使用 HTTP/1.1/2，但 HTTP/3 不可用。使用公网 WHEP 时还需同端口映射
+UDP/TCP 8189；仅使用 LL-HLS 时可不向公网开放 8189。TCP/80、管理 API、RTSP、SRT、
+MoQ、pprof、录制与回放服务均未启用；指标 9998 只在 loopback 提供。
+WHIP/8889 和 RTMP/1935 是可信局域网内的明文发布信令，应由防火墙阻止公网访问。
 
-诊断：
-  sudo ./diagnose.sh
+v1.35 默认限流规则
+------------
 
-证书续期后重新运行 sudo ./start.sh 即可重新加载证书，同时会轮换 OBS 推流码。
-使用 systemd 时执行 `sudo systemctl restart obs-whip-live.service`；服务模式复用
-root-only 凭据，不会因证书重载自动更换 OBS 密码。要主动轮换，先停止 unit，
-运行 `sudo ./stop.sh` 删除凭据，再执行 `sudo systemctl start obs-whip-live.service`。
+v1.35 的默认限流按安全网关识别到的真实来源分组计数：IPv4 保持每个
+/32（单地址）独立，IPv6 按 /64 前缀聚合。
 
+| 流量类型 | 默认规则 | 超限行为 |
+| --- | --- | --- |
+| Web 与 LL-HLS GET/HEAD | 每个 IPv4 /32 或 IPv6 /64 每分钟 6,000 个请求（固定窗口） | HTTP 429，Retry-After 为当前固定窗口剩余的重置秒数（至少 1 秒） |
+| WHEP 会话创建 POST | 每个 IPv4 /32 或 IPv6 /64 滚动窗口 10 次/10 秒且 30 次/60 秒 | HTTP 429 |
+| WHEP 有效操作（create/PATCH/DELETE/心跳） | 每个 IPv4 /32 或 IPv6 /64 30 次/10 秒且 120 次/60 秒（固定窗口） | HTTP 429 |
+| WHEP 活动会话 | 每个 IPv4 /32 或 IPv6 /64 最多 5 个 | HTTP 429 |
 
-版本与发布说明
---------------
-当前版本的更新内容统一写在对应的 GitHub Release 介绍页面。运行包不包含更新
-日志、历史调试报告或测试环境记录，避免旧参数被误认为当前部署要求。
-当前操作始终以本 README、SECURITY.txt、OBS-COMPATIBILITY.txt 和
-CODEC-SUPPORT.txt 为准。
+Web/LL-HLS 与 WHEP 限流表各自最多追踪 20,000 个来源键。WHEP create 在计入
+配额前必须先通过 application/sdp MIME 校验，请求体上限为 256 KiB；会话使用
+60 秒心跳，连续 5 分钟未刷新时回收。以上是 v1.35 内置默认值，不是公网带宽上限。
+当 WHEP 操作同时触发 10 秒和 60 秒窗口时，Retry-After 返回两个窗口中较长的剩余重置时间。
+
+内部 HLS/WHEP 后端地址必须是本机已分配的字面 IP。网关不使用环境 HTTP 代理，
+并把实际连接固定到已校验的 IP/端口；WHEP 后端重定向不会被跟随。
+标准 WHEP OPTIONS 能力发现由网关本地返回，不接触后端，也不消耗创建/操作限额。
+公网 Web/HLS 只接受无请求体的 GET/HEAD；WHEP 创建用 POST，会话控制用 PATCH/DELETE，
+播放器心跳使用 X-WHEP-Keepalive: 1 的无请求体 POST。会话控制绑定创建者的精确来源 IP，
+与 IPv6 /64 的限额聚合范围不同。公网仅路由播放器静态文件、受控 HLS 资源及 WHEP
+入口；/live/whip、/live/whep、MediaMTX 内置播放页及其他管理路径被拒绝。
+WHEP create 返回的 SDP 按启动时 PUBLIC_HOST 的已验证 A 记录精确匹配。
+公网来源不会得到 WHIP_IP；私网、回环或链路本地 IPv4 真实来源可额外获得精确
+WHIP_IP 候选。其他公网地址、IPv6、mDNS 和畸形候选不会返回。
+
+播放行为
+--------
+
+- AUTO 在浏览器具备 RTCPeerConnection 时优先尝试 WebRTC/WHEP；没有 WebRTC 时才走 HLS 检测/播放路径。HLS metadata 并行提供 codec/capability hint，不是 WHEP 的前置依赖。手动 LL-HLS 和手动 WHEP 可独立诊断。
+- 每次 WHEP 建立保留 15 秒期限；AUTO 保留受控重试和连续失败后的 HLS fallback。手动 WHEP 建立超时或编码不支持时保留手动选择并显示错误，可点击 WHEP 重试。切换时取消旧 metadata；晚到 201 只清理它创建的旧 session。
+- LL-HLS Normal：lowLatencyMode=true，target latency 6s，maxBufferLength=10s / maxMaxBufferLength=15s，最大追帧速度 1.05x。
+- bandwidth-loss Weak：lowLatencyMode=true，继续使用可用的 LL-HLS parts；RTT Weak：lowLatencyMode=false，使用完整媒体段。两类 Weak 的 target latency 均为 12s，buffer 上限均为 16s/24s，播放速度 1.00x。
+- 实际 forward buffer 首次达到 8s 才是 Weak READY；之后不低于 6s 可保持 READY，低于6s撤销。target latency、配置或 seek 成功不代表实际 READY。
+- 带宽路径在起播预热后要求连续6个风险样本：带宽/流码率 ratio<1.2 且 buffer<4s，健康样本清零。早期保护可在8秒 stall warmup之前，通过3个有效下降slope或3个 severe-starvation 网络样本保护已开始的播放；暂停、seeking或无效采样间隔不累积趋势证据。
+- RTT分类要求健康请求开销baseline、4个连续相对变差样本、足够带宽/无近期网络错误，并伴随buffer pressure。已有卡顿episode保持dedup及healthy→network升级语义；健康解码器stall不增加网络incident，也不删除已有真实incident。
+- Weak安全定位只在同一段已下载连续buffer内后退1.5–6s；暂停、seeking、结束或旧generation不会移动位置。每个Weak episode最多成功后退一次；初始有界重试结束后仍可由monitor尝试。
+- Fast recovery：ratio≥1.7、buffer≥6s、20个健康样本、最近15s无stall/network error。Stable recovery：ratio≥1.5、buffer≥7s的30个健康样本、最近30s quiet；安全谷值最多保持3000ms既有证据，不增加健康样本。播放器还要求实际Weak READY，成功fragment只清重试计数，不清近期错误时间。
+- Weak→Normal仅更新网络profile，不reload、不flush、不硬跳live edge；恢复后缓慢追赶，不保证latency瞬间降到6s。服务端仍为约2s segment、1s CMAF part、24 segments，与播放器target latency和实际READY是不同指标。
+- WHEP音频需要Opus；RTMP通常发送AAC，要保留AAC声音请手动选择LL-HLS。服务器不做视频/音频转码。
+
+文档
+--------
+
+- 完整部署与运行说明（README.txt）
+- OBS 编码器兼容参数（OBS-COMPATIBILITY.txt）
+- 编码与传输能力（CODEC-SUPPORT.txt）
+- 安全模型（SECURITY.txt）
+- 防火墙与端口（FIREWALL.txt）
+- DNS 配置（DNS-SETUP.txt）
+- 源码构建（BUILDING.md）
+
+简要更新内容见仓库的中文更新日志：
+https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.md
+英文更新日志：
+https://github.com/liying-official/obs-whip-multicodec-llhls-web/blob/main/CHANGELOG.en.md
+以及对应 GitHub Release 页面。详细更新与测试记录保留在本地；完整运行包不包含
+更新日志或详细报告。
+
+源码、二进制与许可证
+----------
+
+- src/：Go 安全网关与辅助程序
+- web/：HTML、CSS、原生 JavaScript 播放器及固定版本 hls.js
+- patches/：MediaMTX 与 gortmplib 的可复现兼容补丁
+- third_party/：第三方许可证、版本、模块图和构建记录
+- tools/：OBS/libdatachannel 行为模拟与回归测试工具
+
+预编译 Linux 二进制不提交到 Git 历史，只通过 Releases 提供。项目自有代码使用
+MIT License（LICENSE）；第三方组件许可证保存在 third_party/。
+
+播放连续性与兼容性边界
+-----------
+
+hls.js 1.7.3 保持官方资源原样；播放器通过 bufferController 扩展点给每次
+SourceBuffer 写入绑定独立超时归属。完成、错误、替换及销毁会撤销旧回调，
+只有当前且仍在 updating 的写入才允许超时恢复，15 秒 append watchdog 保持启用。
+直播已播放至少 8 秒、音频/视频清单发生非致命超时且连续前向缓冲低于 6 秒时，
+立即进入 bandwidth-loss 保护、停止加速并尝试一次有界安全回退。
+保护可能产生短暂 seek 和内容回放；带宽长期低于源实际码率或断网超过缓冲时仍会卡顿。
+项目不提供 ABR、转码或额外带宽，也不能消除路由器/NAT 上的 TCP 重传。
+
+部分 Chromium 环境下，AV1/WHEP 仍可能出现收包继续但视频停止解码的兼容性问题。
+持续收到数据或连接显示 connected 不代表持续解码成功；请分别实际验证手动 WHEP
+和手动 LL-HLS，必要时切换播放模式或编码器。弱网恢复保护不保证任意网络条件下无卡顿。

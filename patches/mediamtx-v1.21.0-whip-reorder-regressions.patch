@@ -1,0 +1,134 @@
+--- a/internal/protocols/webrtc/peer_connection_test.go
++++ b/internal/protocols/webrtc/peer_connection_test.go
+@@ -1104,7 +1104,7 @@
+ 					Payload: []byte{5, 2},
+ 				}}
+ 
+-				for i := uint16(1002); i <= 1065; i++ {
++				for i := uint16(1002); i <= 1001+uint16(inboundRTPReorderWindow); i++ {
+ 					packets = append(packets, &rtp.Packet{
+ 						Header: rtp.Header{
+ 							Version:        2,
+--- /dev/null
++++ b/internal/protocols/webrtc/inbound_reorder_test.go
+@@ -0,0 +1,120 @@
++package webrtc
++
++import (
++	"encoding/binary"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/bluenviron/gortsplib/v5/pkg/rtpreceiver"
++	"github.com/pion/rtcp"
++	"github.com/pion/rtp"
++	"github.com/pion/srtp/v3"
++)
++
++// The fixture contains only extended RTP sequence numbers, in capture order.
++// 60 seconds of real AV1 WHIP: all 126869 unique packets arrived; 202 duplicates.
++// It contains wraparound and bursts reordered by up to 101 packets.
++func TestInboundReorderCapturedWHIP(t *testing.T) {
++	raw, err := os.ReadFile("testdata/whip-av1-sequences.bin")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(raw) == 0 || len(raw)%4 != 0 {
++		t.Fatal("invalid sequence fixture length")
++	}
++	arrivals := make([]uint32, len(raw)/4)
++	var lo, hi uint32
++	for i := range arrivals {
++		n := binary.LittleEndian.Uint32(raw[i*4:])
++		arrivals[i] = n
++		if i == 0 || n < lo {
++			lo = n
++		}
++		if n > hi {
++			hi = n
++		}
++	}
++	for _, profile := range []srtp.ProtectionProfile{srtp.ProtectionProfileAes128CmHmacSha1_80, srtp.ProtectionProfileAeadAes128Gcm} {
++		t.Run(profile.String(), func(t *testing.T) {
++			saltLen, err := profile.SaltLen()
++			if err != nil {
++				t.Fatal(err)
++			}
++			key := make([]byte, 16)
++			salt := make([]byte, saltLen)
++			enc, err := srtp.CreateContext(key, salt, profile)
++			if err != nil {
++				t.Fatal(err)
++			}
++			dec, err := srtp.CreateContext(key, salt, profile, srtp.SRTPReplayProtection(inboundRTPReorderWindow))
++			if err != nil {
++				t.Fatal(err)
++			}
++			encrypted := make(map[uint32][]byte)
++			for n := lo; n <= hi+1; n++ {
++				payload := make([]byte, 4)
++				binary.BigEndian.PutUint32(payload, n)
++				p := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: uint16(n), Timestamp: n * 30, SSRC: 100}, Payload: payload}
++				b, _ := p.Marshal()
++				cipher, e := enc.EncryptRTP(nil, b, nil)
++				if e != nil {
++					t.Fatal(e)
++				}
++				encrypted[n] = cipher
++			}
++			rr := &rtpreceiver.Receiver{ClockRate: 90000, UnrealiableTransport: true, BufferSize: inboundRTPReorderWindow, Period: time.Hour, WritePacketRTCP: func(rtcp.Packet) {}}
++			if err := rr.Initialize(); err != nil {
++				t.Fatal(err)
++			}
++			defer rr.Close()
++			var rejected, lost, delivered uint64
++			next := lo
++			for i, n := range arrivals {
++				plain, e := dec.DecryptRTP(nil, encrypted[n], nil)
++				if e != nil {
++					rejected++
++					continue
++				}
++				p := &rtp.Packet{}
++				if e = p.Unmarshal(plain); e != nil {
++					t.Fatal(e)
++				}
++				out, l := rr.ProcessPacket2(p, time.Unix(0, int64(i)*100000), true)
++				lost += l
++				for _, q := range out {
++					got := binary.BigEndian.Uint32(q.Payload)
++					if got != next {
++						t.Fatalf("out of order: got %d want %d", got, next)
++					}
++					next = got + 1
++					delivered++
++				}
++			}
++			expected := uint64(hi - lo + 1)
++			duplicates := uint64(len(arrivals)) - expected
++			t.Logf("window=%d input=%d unique=%d delivered=%d lost=%d rejected=%d expected_duplicate_rejections=%d", inboundRTPReorderWindow, len(arrivals), expected, delivered, lost, rejected, duplicates)
++			if delivered != expected || lost != 0 || rejected != duplicates {
++				t.Fatalf("complete captured stream was damaged")
++			}
++			if _, e := dec.DecryptRTP(nil, encrypted[hi], nil); e == nil {
++				t.Fatal("replay accepted")
++			}
++			if _, e := dec.DecryptRTP(nil, encrypted[lo], nil); e == nil {
++				t.Fatal("old replay accepted")
++			}
++			// A fresh sequence number isolates authentication from replay rejection.
++			tampered := append([]byte(nil), encrypted[hi+1]...)
++			tampered[len(tampered)-1] ^= 1
++			if _, e := dec.DecryptRTP(nil, tampered, nil); e == nil {
++				t.Fatal("tampered ciphertext accepted")
++			}
++			if _, e := dec.DecryptRTP(nil, encrypted[hi+1], nil); e != nil {
++				t.Fatalf("valid packet rejected after tampered packet: %v", e)
++			}
++			if _, e := dec.DecryptRTP(nil, encrypted[hi+1], nil); e == nil {
++				t.Fatal("fresh packet replay accepted")
++			}
++		})
++	}
++}

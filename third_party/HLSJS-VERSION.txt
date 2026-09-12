@@ -1,25 +1,105 @@
-hls.js R33 vendored asset record
-================================
+v1.35 hls.js 本地资源与来源记录 / Vendored asset and provenance record
+===========================================================
+
+Project version: v1.35. Commands, paths and verification values below are shared
+by both languages. Dated validation records are preserved from that verification;
+this documentation review does not claim a new runtime test or attestation run.
 
 Version:
-  hls.js v1.6.16
+  hls.js v1.7.3
 
 Upstream:
-  https://github.com/video-dev/hls.js
-  npm package: hls.js@1.6.16
+  https://github.com/video-dev/hls.js/releases/tag/v1.7.3
+  Git tag: v1.7.3
+  Git commit: e5ff3583965e3af16c4a4b4d2b5f7bd1ffb5b7de
+  npm package: hls.js@1.7.3
+  Tarball: https://registry.npmjs.org/hls.js/-/hls.js-1.7.3.tgz
 
 Runtime asset:
   web/hls.min.js
 
-Verification:
-  The npm dist.integrity SHA-512 value was verified before the distribution
-  file was bundled.
+npm verification (Windows, 2026-09-12):
+  dist.integrity:
+  sha512-MsPlx6yVW4Qv4C7mEVou4/gk/5cN2dVxOTnrNjPSmyH2f0Ln+/UkG10Ax1PE6OvrmTVPKgQYozTtBaPOuCzq7A==
 
-SHA-256:
-  442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0
+  dist.shasum:
+  79a3338dd2e78fe63fc2ba6cfebdf5e34495537a
 
-Runtime behavior:
-  R33 serves this file locally and does not download hls.js during startup.
+  Isolated npm 11.6.2 audit signatures verified 1 registry signature and 1
+  provenance attestation. npm install --ignore-scripts --omit=dev reported
+  zero vulnerabilities in the isolated hls.js@1.7.3 installation. The package
+  has no runtime dependencies. Published tarball SHA-512/SHA-1 and extracted
+  asset identity are verified. No npm installation is needed at runtime.
+
+Runtime asset SHA-256:
+  a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e
+
+Project use:
+  appendTimeout, liveMaxUnchangedPlaylistRefresh, ResetMediaSource recovery
+  and bufferAppendNoProgress handling remain enabled. Version 1.7.3 adds
+  the upstream live-playlist synchronous-loader recursion guard and includes
+  the fix for blocking reload at MSN 0. Existing single-rendition,
+  weak-network and WHEP-first AUTO behavior is retained. No startup network
+  fetch is required. start.sh checks this version marker and the fixed
+  SHA-256 before launching the media stack.
+
+Validation scope:
+  The vendored asset is the unmodified published npm dist/hls.min.js.
+  Project JavaScript regressions exercise the actual 1.7.3 BufferController
+  append-ownership extension and the weak-network/player lifecycle policy.
+  See the accompanying upgrade report for complete runtime and release test
+  results. Historical upstream lint/build/unit runs are not claimed as
+  fresh 1.7.3 tests.
 
 License:
-  See HLSJS-LICENSE.txt.
+  See HLSJS-LICENSE.txt, copied from the same published npm package.
+
+Project controller extension:
+  web/hls-weak-network-policy.js exports withAppendOwnership(Base).
+  web/app.js supplies it through Hls.DefaultConfig.bufferController.
+  This guards append-deadline lifetime using pinned 1.7.3 controller methods.
+  Compatibility of the published src/controller/buffer-controller.ts methods
+  was checked during the upgrade. The real-controller regression reproduces an idle abort
+  with the raw controller and verifies completion, queue-head replacement,
+  buffer replacement, error, destruction, and active-timeout ownership with
+  the extension. Raw dist/hls.min.js is unchanged; future library updates
+  must rerun the real-controller and browser AV1 continuity regressions.
+
+中文说明（与上文共用上游地址、提交和完整校验值）
+================================================
+
+版本与来源：
+  本项目版本为 v1.35，随包 hls.js 版本为 v1.7.3。上游发布页、Git 标签与提交、
+  npm 包 hls.js@1.7.3 和 tarball 地址见上文。运行资源位于 web/hls.min.js。
+
+npm 验证记录（Windows，2026-09-12）：
+  上文 dist.integrity 是下载包的 SHA-512，dist.shasum 是其 SHA-1；
+  Runtime asset SHA-256 是解压后实际运行资源的 SHA-256，三者不可混用。
+  隔离的 npm 11.6.2 audit signatures 核验了 1 份注册表签名和 1 份来源证明。
+  npm install --ignore-scripts --omit=dev 在隔离的 hls.js@1.7.3 安装中报告
+  零漏洞；该包没有运行时依赖。已核验发布包 SHA-512/SHA-1 与解压资源一致性。
+  运行时无需 npm 安装，也不需要启动时访问网络下载资源。
+
+项目行为：
+  appendTimeout、liveMaxUnchangedPlaylistRefresh、ResetMediaSource 恢复和
+  bufferAppendNoProgress 处理保持启用。v1.7.3 包含实时播放列表同步加载器
+  递归保护及 MSN 0 阻塞重载修复。现有单路编码、弱网和优先 WHEP 的 AUTO 行为
+  保留。start.sh 在启动媒体服务前检查此版本标记和固定 SHA-256。
+
+验证范围：
+  随包资源是未修改的 npm dist/hls.min.js。项目 JavaScript 回归针对真实
+  v1.7.3 BufferController 的追加归属扩展、弱网策略和播放器生命周期执行。
+  完整运行时与发行验证见随附升级报告；历史上游 lint、构建和单元测试不当作
+  本次 v1.7.3 的新验证，本次文档整理也不代表重新执行运行测试。
+
+项目控制器扩展：
+  web/hls-weak-network-policy.js 导出 withAppendOwnership(Base)，
+  web/app.js 通过 Hls.DefaultConfig.bufferController 使用它；扩展利用固定的
+  v1.7.3 控制器方法保护追加超时的归属。升级时已检查上游
+  src/controller/buffer-controller.ts 方法兼容性。真实控制器回归先复现原始
+  控制器的空闲中止，再验证扩展下的完成、队头替换、缓冲区替换、错误、销毁和
+  活动超时归属。原始 dist/hls.min.js 未修改。后续库升级必须重新运行真实控制器
+  回归和浏览器 AV1 连续播放回归。
+
+许可证：
+  HLSJS-LICENSE.txt 来自同一个 npm 发布包，法律文本保持原样。

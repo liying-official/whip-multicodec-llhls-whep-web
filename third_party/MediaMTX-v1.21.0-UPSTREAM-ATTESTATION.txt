@@ -1,0 +1,115 @@
+v1.35 MediaMTX v1.21.0 上游来源证明 / Upstream artifact attestation
+===========================================================
+
+Project version: v1.35. Commands, paths and verification values below are shared
+by both languages. Dated validation records are preserved from that verification;
+this documentation review does not claim a new runtime test or attestation run.
+
+Verification date:
+  2026-09-12
+
+Official release:
+  https://github.com/bluenviron/mediamtx/releases/tag/v1.21.0
+
+Verified source and signing identity:
+  repository: bluenviron/mediamtx
+  source commit: 2c6727904fbf233615de74a6c54a9b94dbf6025d
+  source ref: refs/tags/v1.21.0
+  signer workflow: bluenviron/mediamtx/.github/workflows/release.yml
+  certificate SAN:
+    https://github.com/bluenviron/mediamtx/.github/workflows/release.yml@refs/tags/v1.21.0
+  certificate issuer: CN=sigstore-intermediate,O=sigstore.dev
+  OIDC issuer: https://token.actions.githubusercontent.com
+  runner environment: github-hosted
+  predicate type: https://slsa.dev/provenance/v1
+  release invocation:
+    https://github.com/bluenviron/mediamtx/actions/runs/33992881325/attempts/1
+
+Verified transparency-log evidence, identical for both artifacts:
+  type: Tlog
+  URI: https://rekor.sigstore.dev
+  verified timestamp: 2026-09-06T05:28:38+08:00
+  equivalent UTC timestamp: 2026-09-05T21:28:38Z
+  bundle integratedTime: 1788643718
+
+Verified official release subjects (archive SHA-256):
+  mediamtx_v1.21.0_linux_amd64.tar.gz
+    e02e34c3337a35f20ac9e5aa31524566108964e6e37dbc46cf8292169f6c792b
+  mediamtx_v1.21.0_linux_arm64.tar.gz
+    a8113b5928ba1a934b81557b61b8a07954b76921a4b567d54c7f086f8b39d9a2
+
+Verification procedure and result:
+  GitHub CLI 2.100.0 (2026-09-03) verified each official archive against its
+  downloaded Sigstore bundle. Both invocations returned 0. The checks required
+  repository bluenviron/mediamtx, the exact source digest and source ref above,
+  the release signer workflow, SLSA provenance and --deny-self-hosted-runners.
+  Verified certificate fields, statement subjects and verifiedTimestamps were
+  checked from each JSON result; the statement resolves the source dependency
+  to the exact v1.21.0 commit. Downloaded archive hashes also matched the
+  official GitHub release metadata digests.
+
+  Before use, the GitHub CLI Linux amd64 distribution was checked against its
+  recorded published SHA-256:
+    e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be
+
+  The accompanying upgrade evidence includes attest-inputs.log,
+  attestation-result.txt, attestation-amd64.json and attestation-arm64.json.
+  These records verify the exact v1.21.0 artifacts on the date stated above.
+
+Patched dependency identity:
+  repository: https://github.com/bluenviron/gortmplib.git
+  source commit: fbafd129baf54d49a2e3243f620d738ed72ff82e
+  source ref: refs/tags/v1.0.2
+  Its source tag was resolved and its compatibility patch checked separately.
+  The MediaMTX artifact attestation is not a separate gortmplib attestation.
+
+Scope of custom builds:
+  The project builds v1.21.0-r11 from the verified MediaMTX source commit using
+  Go 1.27.1, the patches in BUILDING.md, the exact MediaMTX-go.mod/go.sum graph
+  and a sibling patched gortmplib v1.0.2. Its embedded HLS library is v1.7.3.
+  The upstream attestation covers the official release archives above; it does
+  not certify the patched project binaries. Both custom architectures were
+  separately rebuilt with a fresh GOCACHE and matched byte-for-byte. Their
+  hashes and test/scan results are in MediaMTX-AOM-AV1-PATCH.txt, BUILDING.md
+  and the package SHA256SUMS.
+
+中文说明（与上文共用完整身份字段、地址和校验值）
+================================================
+
+验证对象与日期：
+  本项目版本为 v1.35。本记录的对象是官方 MediaMTX v1.21.0 发行包，验证日期为
+  2026-09-12；本次文档整理不表示重新签发来源证明或再次执行该验证。
+
+验证的源码与签名身份：
+  repository 为 bluenviron/mediamtx；source commit/ref 分别是上文固定提交和
+  refs/tags/v1.21.0；signer workflow 为该仓库的 .github/workflows/release.yml。
+  certificate SAN、证书颁发者、GitHub Actions OIDC 颁发者、github-hosted
+  runner 环境、SLSA provenance predicate 和准确 release invocation 地址均见
+  上文，验证时逐项限制并检查，不能以任意仓库或任意工作流的有效签名替代。
+
+透明日志与主体：
+  两个发行包的证据均为 https://rekor.sigstore.dev 的 Tlog，已验证时间戳
+  2026-09-06T05:28:38+08:00 等同于 2026-09-05T21:28:38Z，bundle 的
+  integratedTime 为 1788643718。上文分别列出官方 amd64/arm64 归档的准确
+  文件名和 SHA-256；这些不是本项目定制二进制的哈希。
+
+过程与结果：
+  GitHub CLI 2.100.0（2026-09-03）使用下载的 Sigstore bundle 核验每个官方
+  归档，两次命令均返回 0。验证要求准确仓库、源码 digest/ref、发行签名工作流、
+  SLSA provenance，并启用 --deny-self-hosted-runners。逐项读取 JSON 的已验证
+  证书字段、statement subjects 和 verifiedTimestamps；statement 的源码依赖
+  解析到准确的 v1.21.0 提交。下载包哈希同时匹配官方 GitHub 发行元数据 digest。
+  使用 GitHub CLI 前，已核验其 Linux amd64 发行包与上文记录的官方 SHA-256
+  一致。证据文件包括 attest-inputs.log、attestation-result.txt、
+  attestation-amd64.json 和 attestation-arm64.json；它们对应上述日期和准确对象。
+
+修补依赖身份：
+  gortmplib 仓库、固定提交和 refs/tags/v1.0.2 见上文。其源码标签解析和兼容补丁
+  单独核验；MediaMTX 归档来源证明不等于另行取得了 gortmplib 来源证明。
+
+定制构建范围：
+  项目以已核验的 MediaMTX 提交、Go 1.27.1、BUILDING.md 中的补丁、准确的
+  MediaMTX-go.mod/go.sum 和同级修补版 gortmplib v1.0.2 构建 v1.21.0-r11，
+  内嵌 hls.js 为 v1.7.3。上游证明只覆盖所列官方归档，不认证定制二进制。
+  两种定制架构另以全新 GOCACHE 重建，逐字节一致；哈希和测试/扫描结果见
+  MediaMTX-AOM-AV1-PATCH.txt、BUILDING.md 及发行包 SHA256SUMS。

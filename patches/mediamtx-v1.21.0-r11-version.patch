@@ -1,0 +1,17 @@
+diff --git a/go.mod b/go.mod
+--- a/go.mod
++++ b/go.mod
+@@ -1,5 +1,5 @@
+ module github.com/bluenviron/mediamtx
+ 
+-go 1.26.0
++go 1.27.1
+ 
+ require (
+diff --git a/internal/core/VERSION b/internal/core/VERSION
+new file mode 100644
+index 0000000..fca43c4
+--- /dev/null
++++ b/internal/core/VERSION
+@@ -0,0 +1 @@
++v1.21.0-r11

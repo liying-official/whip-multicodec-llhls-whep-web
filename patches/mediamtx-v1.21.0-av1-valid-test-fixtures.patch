@@ -1,0 +1,59 @@
+diff --git a/internal/servers/webrtc/server_test.go b/internal/servers/webrtc/server_test.go
+index 8d1d4ad..3c36a3d 100644
+--- a/internal/servers/webrtc/server_test.go
++++ b/internal/servers/webrtc/server_test.go
+@@ -507,9 +507,9 @@ func TestServerRead(t *testing.T) {
+ 				}},
+ 			}},
+ 			&unit.Unit{
+-				Payload: unit.PayloadAV1{{1, 2}},
++				Payload: unit.PayloadAV1{{0x30, 0x30, 0x22}},
+ 			},
+-			[]byte{0x10, 0x01, 0x02},
++			[]byte{0x10, 0x30, 0x30, 0x22},
+ 		},
+ 		{
+ 			"vp9",
+diff --git a/internal/stream/rtp_decoder_test.go b/internal/stream/rtp_decoder_test.go
+index 3278b98..94c8397 100644
+--- a/internal/stream/rtp_decoder_test.go
++++ b/internal/stream/rtp_decoder_test.go
+@@ -36,13 +36,13 @@ var casesDecodeEncode = []struct {
+ 				},
+ 				Payload: []byte{
+ 					0x10,
+-					0x02,       // Size = 2
+-					0x01, 0x02, // OBU data
++					0x30,       // FRAME OBU without internal size
++					0x30, 0x22, // OBU data
+ 				},
+ 			},
+ 		},
+ 		decoded: unit.PayloadAV1{
+-			{0x02, 0x01, 0x02}, // Size byte included with OBU data
++			{0x30, 0x30, 0x22},
+ 		},
+ 	},
+ 	{
+diff --git a/internal/stream/stream_test.go b/internal/stream/stream_test.go
+index 67bdf91..3a631d9 100644
+--- a/internal/stream/stream_test.go
++++ b/internal/stream/stream_test.go
+@@ -588,7 +588,7 @@ func TestStreamAlwaysAvailable(t *testing.T) {
+ 					})
+ 				} else {
+ 					soAV1b.Do(func() {
+-						require.Equal(t, unit.PayloadAV1{{1, 2, 3, 4}}, u.Payload)
++						require.Equal(t, unit.PayloadAV1{{0x30, 0x30, 0x22}}, u.Payload)
+ 						wg.Done()
+ 					})
+ 				}
+@@ -791,7 +791,7 @@ func TestStreamAlwaysAvailable(t *testing.T) {
+ 
+ 			subStream.WriteUnit(subStream.InDesc.Medias[0], subStream.InDesc.Medias[0].Formats[0], &unit.Unit{
+ 				PTS:     0,
+-				Payload: unit.PayloadAV1{{1, 2, 3, 4}},
++				Payload: unit.PayloadAV1{{0x30, 0x30, 0x22}},
+ 			})
+ 
+ 			subStream.WriteUnit(subStream.InDesc.Medias[1], subStream.InDesc.Medias[1].Formats[0], &unit.Unit{
