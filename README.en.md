@@ -361,7 +361,7 @@ the actual source bitrate or an outage exceeding the buffer still causes stalls.
 The project does not provide ABR, transcoding, or additional bandwidth, and cannot
 eliminate router/NAT TCP retransmissions.
 
-Some Chromium environments can still stop decoding AV1/WHEP video while receiving
-packets. Continued reception or a connected state does not prove continuous decoding.
+When the playback device does not support AV1 hardware decoding and uses software
+decoding, AV1/WHEP video may still stop decoding while packets continue to arrive. Continued reception or a connected state does not prove continuous decoding.
 Validate manual WHEP and manual LL-HLS separately, and change playback mode or codec
 if needed. Weak-link recovery does not guarantee stall-free playback under every condition.
