@@ -64,7 +64,7 @@ systemd-analyze、systemd-notify、systemctl 和 flock。使用预编译包无�
 2. 在下载目录执行下列命令。此流程仅适用于 /opt/obs-whip-live 不存在的首次安装；
    已有部署使用后面的“卸载与重装”流程。目录已存在时 mkdir 会失败，不能继续覆盖解压。
    set -eu
-   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix12.tar.gz'
    sha256sum -c "$archive.sha256"
    sudo mkdir -m 0755 /opt/obs-whip-live
    sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
@@ -136,7 +136,7 @@ sudo ./uninstall.sh --purge 会删除项目目录，不可用于保留数据的�
 以外的自定义证书路径，须在安装前单独恢复这些证书/私钥并核验所有权和权限；不要恢复
 旧代码、模板或其他受管文档。恢复配置后仍需确认域名、端口和网卡符合当前环境。
 set -eu
-archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix12.tar.gz'
 cd "$(dirname "$archive")"
 sha256sum -c "$(basename "$archive").sha256"
 sudo mkdir -m 0700 /opt/obs-whip-live-backup
@@ -260,8 +260,13 @@ WHIP_IP 候选。其他公网地址、IPv6、mDNS 和畸形候选不会返回。
 - 带宽路径在起播预热后要求连续6个风险样本：带宽/流码率 ratio<1.2 且 buffer<4s，健康样本清零。早期保护可在8秒 stall warmup之前，通过3个有效下降slope或3个 severe-starvation 网络样本保护已开始的播放；暂停、seeking或无效采样间隔不累积趋势证据。
 - RTT分类要求健康请求开销baseline、4个连续相对变差样本、足够带宽/无近期网络错误，并伴随buffer pressure。已有卡顿episode保持dedup及healthy→network升级语义；健康解码器stall不增加网络incident，也不删除已有真实incident。
 - Weak安全定位只在同一段已下载连续buffer内后退1.5–6s；暂停、seeking、结束或旧generation不会移动位置。每个Weak episode最多成功后退一次；初始有界重试结束后仍可由monitor尝试。
-- Fast recovery：ratio≥1.7、buffer≥6s、20个健康样本、最近15s无stall/network error。Stable recovery：ratio≥1.5、buffer≥7s的30个健康样本、最近30s quiet；安全谷值最多保持3000ms既有证据，不增加健康样本。播放器还要求实际Weak READY，成功fragment只清重试计数，不清近期错误时间。
-- Weak→Normal仅更新网络profile，不reload、不flush、不硬跳live edge；恢复后缓慢追赶，不保证latency瞬间降到6s。服务端仍为约2s segment、1s CMAF part、24 segments，与播放器target latency和实际READY是不同指标。
+- Fast recovery：ratio≥1.7、20个健康样本、最近15s无stall/network error；Stable recovery：ratio≥1.5、30个健康样本、最近30s quiet。两条路径提交时均复核当前位置所在连续可播放缓冲≥6s，不依赖首次8s READY。低于6s的短谷值最多保持3000ms既有stable计数，不增加样本、不退出。
+- fix12：同一Hls重载清单前重置统计上下文，保留当前请求的原生完成/错误回调；旧owner、取消和被替换请求仍隔离。连续清单错误共用有界的2.5s饥饿确认，不反复顺延；退出或销毁时取消。Loader不改变载荷或上游超时；独立body-idle中止保持关闭，不能保证消除所有长时间网络等待。
+- fix12：有效RTT参照仍要求4个当前同类请求改善至baseline+100ms以内。缺失、过期、上下文或请求形态改变时，仅整段恢复分支可重新取证：8个样本跨度至少6s，再由4个后续请求验证；候选开销≤200ms，并要求带宽裕量、≥6s缓冲及新鲜视频推进。坏样本、间隙或上下文变化重置候选；原参照300s有效期不延长。200ms是本分支保守资格上限，持续高于它的网络可能保持未知，不是所有网络的健康标准。
+- fix12：恢复资格使用单调时钟、新鲜主视频传输与媒体推进；离线、暂停、seek、冻结或长采样中断后重新取证。READY的8/6s迟滞、带宽/样本/静默门槛、单次安全回退及append保护保留。
+- 弱网退出在原Hls/MSE/媒体时间线上完成，不因退出或追赶reload、seek、清空有效前向缓冲、重建、暂停/重播。模式已正常但延迟较大时，按钮显示“平滑追赶”；同一恢复链路不补发回退预算。真实媒体缺失、致命网络/解码故障仍使用原恢复流程。
+- 平滑追赶由应用单独在1.00–1.05x内控制，最多每秒上调0.05；缓冲低于3s先回1x，恢复到4s并有新鲜健康证据后才再加速。6s是退出准入，不是追赶期间缓冲永不波动的承诺。临时最大延迟保护为24–120s的有限值：在进入过渡时从有效当前媒体窗口计算并固定；原生倍速控制临时为1。实际延迟≤6.75s并连续确认3s后恢复正常18s最大延迟和1.05x原生上限。暂停、离线、错误和证据不足时显示暂缓原因，不到时强制seek。
+- 正常目标仍是6s；最高1.05x消化6s额外延迟的理论下界为120s，缓冲保护会延长该过程。服务端仍约2s segment、1s CMAF part、24 segments；音视频共用媒体时钟，不能保证所有浏览器主观听不出变速。
 - WHEP音频需要Opus；RTMP通常发送AAC，要保留AAC声音请手动选择LL-HLS。服务器不做视频/音频转码。
 
 文档
@@ -275,12 +280,10 @@ WHIP_IP 候选。其他公网地址、IPv6、mDNS 和畸形候选不会返回。
 - DNS 配置（DNS-SETUP.txt）
 - 源码构建（BUILDING.md）
 
-简要更新内容见仓库的中文更新日志：
+简要更新内容见仓库中英文精简更新日志和对应 GitHub Release 页面：
 https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.md
-英文更新日志：
 https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.en.md
-以及对应 GitHub Release 页面。详细更新与测试记录保留在本地；完整运行包不包含
-更新日志或详细报告。
+详细更新、修复方案、报告、日志与证据保留在本地，不提交到公开仓库或发行附件。
 
 源码、二进制与许可证
 ----------

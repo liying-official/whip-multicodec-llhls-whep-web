@@ -216,7 +216,7 @@ explicit mode allowlist. Keep the established package epoch:
 
 ```sh
 SOURCE_DATE_EPOCH=1788652800 bash tools/package-release.sh \
-  ../release/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz
+  ../release/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix12.tar.gz
 ```
 
 The official packager regenerates SHA256SUMS in the output archive and normalizes

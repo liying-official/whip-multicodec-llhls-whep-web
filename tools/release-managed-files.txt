@@ -48,11 +48,14 @@ tests/control-plane-repair.test.sh
 tests/diagnose-exit-status.test.sh
 tests/dns-resolution.test.sh
 tests/fixtures/whip-av1-sequences.bin
+tests/hls-seamless-exit.test.js
 tests/hls-weak-network-policy.test.js
 tests/install-systemd-trust.test.sh
 tests/package-release-preflight.test.sh
 tests/player-lifecycle.test.js
+tests/request-observation.test.js
 tests/stop-clear-authorization.test.sh
+tests/weak-recovery-evidence.test.js
 tests/whep-opus-stereo.test.js
 tests/whep-runtime.test.sh
 third_party/Caddy-BUILD.txt

@@ -20,3 +20,21 @@ config.local.env
 CHANGELOG.full.*
 RELEASE_NOTES.full.*
 *.zip
+
+# Private diagnostics, plans and credentials / 私有诊断、方案和凭据
+/evidence/
+/reports/
+/repair-plans/
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.pem
+*.key
+*.p12
+*.pfx
+*-Report*.md
+*-report*.md
+*-Repair-Prompt*.md
+*-repair-plan*.md
+*-repair-evidence*

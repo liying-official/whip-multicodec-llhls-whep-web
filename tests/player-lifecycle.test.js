@@ -181,7 +181,7 @@ function makeHarness() {
     clearTimeout: id => timeouts.delete(id),
     document: { getElementById: id => elements.get(id) },
     navigator: { onLine: true },
-    performance: { now: () => 0 },
+    performance: { now: () => now },
     setInterval: callback => {
       const id = nextTimer++;
       intervals.set(id, callback);
@@ -408,7 +408,7 @@ test("FRAG_LOADED preserves recent-error time and a new HLS session resets weak 
 
   harness.windowTarget.__livePlayer.hls();
   const nextSession = harness.windowTarget.__livePlayer.network;
-  assert.equal(nextSession.hlsLastNetworkErrorAt, 0);
+  assert.equal(nextSession.hlsLastNetworkErrorAt, null);
   assert.equal(nextSession.hlsStallEpisodeActive, false);
   assert.equal(nextSession.hlsRecentStallIncidents, 0);
   assert.equal(nextSession.hlsFastRecoverySamples, 0);
@@ -927,7 +927,8 @@ for (const kind of ["bandwidth-loss", "rtt"]) {
       for (let i = 0; i < 4; i += 1) { h.tick(); partSample(h, 350); }
     } else {
       h.instance.bandwidthEstimate = 4400000;
-      for (const b of [5.5, 4.9, 4.3, 3.7]) { h.ahead(b); h.tick(); }
+      // Current media completions make the supplied bandwidth estimate fresh.
+      for (const b of [5.5, 4.9, 4.3, 3.7]) { h.ahead(b); partSample(h, 50); h.tick(); }
     }
     let n = h.windowTarget.__livePlayer.network;
     assert.equal(n.hlsWeakNetworkClass, kind);
@@ -942,11 +943,19 @@ for (const kind of ["bandwidth-loss", "rtt"]) {
     h.ahead(5.9); h.tick(); assert.equal(h.windowTarget.__livePlayer.network.hlsWeakBufferReady, false);
     assert.equal(h.windowTarget.__livePlayer.network.hlsWeakNetworkMode, true);
     h.ahead(8.5); h.instance.bandwidthEstimate = 8000000;
-    for (let i = 0; i < 21; i += 1) h.tick();
+    // Recovery now needs fresh comparable requests plus actual media motion.
+    for (let i = 0; i < 26; i += 1) { h.video.currentTime += 1; partSample(h, 50); h.tick(); }
+    // V2: mode exit precedes physical convergence. This fixture's measured
+    // latency is already 5s; supply a fresh 3s settle interval before asserting
+    // the unchanged final steady profile. Dynamic convergence is tested in SE12.
+    for (let i = 0; i < 4; i++) { h.video.currentTime += 1; partSample(h, 50); h.tick(); }
     assert.deepEqual(profileSnapshot(h), fresh);
     n = h.windowTarget.__livePlayer.network;
     assert.equal(n.hlsWeakNetworkClass, ""); assert.equal(n.hlsWeakBufferReady, false);
-    assert.equal(n.hlsRequestOverheadBaselineMs, null); assert.equal(n.hlsLastWeakSafePointAt, 0);
+    // RTT keeps its reference; the bandwidth case learns these healthy samples
+    // once normal mode resumes. Neither path clears a healthy reference.
+    assert.equal(n.hlsRequestOverheadBaselineMs, 50);
+    assert.equal(n.hlsLastWeakSafePointAt, 0);
   });
 }
 
@@ -1004,6 +1013,22 @@ test("V5: RTT upgrades once on fatal loss and cannot oscillate back", () => {
   assert.equal(h.instance.config.lowLatencyMode, true);
   for (let i = 0; i < 20; i += 1) { h.tick(); partSample(h, 400); }
   assert.equal(h.windowTarget.__livePlayer.network.hlsWeakNetworkClass, "bandwidth-loss");
+});
+
+test("SE6/SE13: a fatal class upgrade retains the same episode's unspent safe-point timer", () => {
+  const h = runningHls(); h.ahead(6);
+  for (let i = 0; i < 4; i++) { h.tick(); partSample(h, 50); }
+  h.ahead(5);
+  for (let i = 0; i < 4; i++) { h.tick(); partSample(h, 350); }
+  assert.equal(h.windowTarget.__livePlayer.network.hlsWeakNetworkClass, "rtt");
+  const pending = h.scheduledTimeouts.findLast(t => t.delay === 0 && h.timeouts.has(t.id));
+  assert.ok(pending); h.ahead(6.5); h.instance.liveSyncPosition = 100;
+  h.instance.emit(h.MockHls.Events.ERROR, { fatal: true, type: "networkError", details: "fragLoadError" });
+  h.timeouts.delete(pending.id); pending.callback();
+  assert.equal(h.windowTarget.__livePlayer.network.hlsWeakNetworkClass, "bandwidth-loss");
+  assert.ok(h.video.currentTime < 105, "same-episode upgrade must not strand the existing safe-point retry");
+  assert.ok(h.windowTarget.__livePlayer.network.hlsLastWeakSafePointAt > 0);
+  const after = h.video.currentTime; pending.callback(); assert.equal(h.video.currentTime, after);
 });
 
 test("V5: auto without RTCPeerConnection uses HLS; stale auto WHEP cannot override manual HLS", async () => {

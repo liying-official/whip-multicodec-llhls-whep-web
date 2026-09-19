@@ -72,7 +72,7 @@ run the prebuilt package.
 
    ```sh
    set -eu
-   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
+   archive='obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix12.tar.gz'
    sha256sum -c "$archive.sha256"
    sudo mkdir -m 0755 /opt/obs-whip-live
    sudo tar -xzf "$archive" -C /opt/obs-whip-live --strip-components=1 --same-owner --same-permissions
@@ -169,7 +169,7 @@ ports, and interfaces before use.
 
 ```sh
 set -eu
-archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix10.tar.gz'
+archive='/absolute/path/obs-whip-multicodec-llhls-web-debian13-v1.35-weak-network-fix12.tar.gz'
 cd "$(dirname "$archive")"
 sha256sum -c "$(basename "$archive").sha256"
 sudo mkdir -m 0700 /opt/obs-whip-live-backup
@@ -311,8 +311,13 @@ Private, loopback, or link-local real IPv4 sources may additionally receive the 
 - The bandwidth path requires six consecutive risk samples after playback warmup: bandwidth/stream-bitrate ratio<1.2 and buffer<4s; a healthy sample resets the count. Early protection can act before the 8-second stall warmup after three valid drain slopes or three severe-starvation network samples during actual playback. Pauses, seeking, and invalid sampling gaps discard trend evidence.
 - RTT classification needs a healthy request-overhead baseline, four consecutive relatively degraded request samples, bandwidth headroom, no recent network errors, and buffer pressure. Physical stall episodes retain deduplication and healthy-to-network escalation; a healthy decoder stall does not erase an earlier real incident.
 - The weak safe point can move backward only 1.5–6s within one downloaded continuous range. Paused, seeking, ended, or stale-generation media cannot be moved. Each Weak episode permits one successful backtrack; the monitor may retry after the initial bounded retry loop.
-- Fast recovery needs ratio≥1.7, buffer≥6s, 20 healthy samples, and 15s without stall/network error. Stable recovery needs ratio≥1.5, 30 samples with buffer≥7s, and 30s quiet. Safe cadence valleys hold existing evidence for at most 3000ms without inventing healthy samples. The app also requires actual Weak READY; successful fragments clear retry counts, not the recent-error timestamp.
-- Weak-to-Normal updates the profile without reload, flush, or a hard live-edge seek. Gradual catch-up does not immediately restore 6s latency. Server segmentation remains about 2s per segment, 1s per CMAF part, and 24 retained segments; these differ from player target latency and actual READY.
+- Fast recovery retains ratio≥1.7, 20 healthy samples and 15s without stalls/network errors; stable retains ratio≥1.5, 30 samples and 30s quiet. Both recheck at least 6s in the current continuous playable range at commit, independently of first reaching 8s READY. Sub-6s valleys may retain prior stable counts for 3000ms but cannot add samples or commit an exit.
+- fix12 resets observation context before same-Hls manifest reloads while preserving current native completion/error callbacks. Stale owners, canceled and replaced attempts remain isolated. Repeated playlist errors share one bounded 2.5s starvation confirmation without postponing it; exit or teardown cancels it. The Loader changes neither payloads nor upstream deadlines. Independent body-idle cancellation stays disabled; all long network waits are not claimed resolved.
+- fix12 retains four comparable requests improved to baseline+100ms for a valid RTT reference. Missing/expired references, context changes or part-to-whole changes can requalify only in the whole-segment recovery branch: collect eight observations spanning at least 6s, then validate with four later requests. Candidate overhead must be ≤200ms with bandwidth headroom, ≥6s reserve and fresh video motion. Bad evidence, gaps or context changes reset the candidate; the original 300s reference lifetime is not extended. The 200ms cap is conservative and local to this branch: consistently higher overhead can remain unknown, rather than being a universal network-health standard.
+- fix12 uses monotonic time, fresh main-video transfers and media motion. Offline, pause, seek, freeze and long observation gaps require fresh evidence. READY 8/6s hysteresis, bandwidth/count/quiet thresholds, the single safe backtrack and append ownership protection remain.
+- Qualified exit preserves the same Hls/MSE/media timeline, without exit/catch-up-induced reload, seek, forward-buffer flush, rebuild, pause or replay. The HLS button indicates smooth catch-up after mode exit while measured latency remains high. Soft transitions do not replenish the recovery chain backtrack budget. Independent missing media or fatal network/decoder failures retain their original recovery paths.
+- During catch-up the app alone controls 1.00–1.05x, rising at most 0.05 per second. It brakes below 3s reserve and resumes above 4s only with fresh healthy evidence. The 6s exit admission is not a permanent buffer floor. A finite 24–120s maximum-latency guard is derived once from a validated current media window and held for the recovery chain; native rate control is temporarily 1. When actual latency is ≤6.75s for a fresh 3s confirmation, normal 18s maximum latency and native 1.05x are restored. Pause, offline, errors and insufficient evidence show a suspension reason; elapsed time never forces a seek.
+- The normal target remains 6s. At 1.05x, consuming 6s of excess delay has a theoretical minimum of 120s and buffer protection may take longer. Server segmentation stays about 2s per segment, 1s per CMAF part and 24 retained segments. Audio and video share one media clock; subjective inaudibility of the speed change is not guaranteed across browsers.
 - WHEP audio requires Opus. RTMP commonly supplies AAC; select manual LL-HLS to retain AAC audio. The server does not transcode video or audio.
 
 ## Documentation
@@ -327,8 +332,8 @@ Private, loopback, or link-local real IPv4 sources may additionally receive the 
 
 Brief updates are available in the repository [English changelog](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.en.md),
 [Chinese changelog](https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHANGELOG.md), and the corresponding GitHub Release.
-Detailed change and test records remain local. Runtime archives exclude changelogs
-and detailed reports.
+Detailed changelogs, repair plans, reports, logs and evidence remain local and are
+excluded from the public repository and release assets.
 
 ## Source, binaries, and licensing
 

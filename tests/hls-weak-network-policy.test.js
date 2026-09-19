@@ -108,11 +108,15 @@ function lowBandwidthSample(state, ratio, bufferAhead = 2) {
 }
 
 function recoverySample(state, ratio, bufferAhead, now, noRecentNetworkErrors = true) {
+  // These existing threshold tests model healthy current transfers/motion;
+  // stale, frozen and interrupted evidence is tested separately below.
+  if (!state.recoveryMotion) state.recoveryMotion = { time: now / 1000 - 1, end: now / 1000 - 1 + bufferAhead };
+  policy.noteMediaTransfer(state, { now, duration: 2 });
   return policy.sampleRecovery(state, {
     bandwidthRatio: ratio,
     bufferAhead,
     noRecentNetworkErrors,
-    now
+    now, currentTime: now / 1000, bufferEnd: now / 1000 + bufferAhead
   });
 }
 
@@ -305,7 +309,7 @@ test("healthy stalls in normal mode add no weak-network stall evidence", () => {
     assert.equal(result.enterWeak, false);
     policy.endStallEpisode(state);
   }
-  assert.equal(state.lastStallAt, 0);
+  assert.equal(state.lastStallAt, null);
   assert.deepEqual(state.stallIncidents, []);
 });
 
@@ -405,7 +409,7 @@ test("boundary matrix: entry, health, recovery ratios and buffers remain exact",
     recoverySample(state, ratio, 7, 40000);
     assert.equal(state.stableRecoverySamples, expected, `stable ratio ${ratio}`);
   }
-  for (const [bufferAhead, expected] of [[6.999, 0], [7, 1], [7.001, 1]]) {
+  for (const [bufferAhead, expected] of [[5.999, 0], [6, 1], [6.001, 1]]) {
     const state = policy.createState();
     recoverySample(state, 1.5, bufferAhead, 40000);
     assert.equal(state.stableRecoverySamples, expected, `stable buffer ${bufferAhead}`);
@@ -640,7 +644,7 @@ test("startup warmup discards startup stalls from the normal entry window", () =
   assert.equal(stall(state, 14000, 1.1, 0.5, true).enterWeak, false);
   policy.endStallEpisode(state);
   assert.equal(stall(state, 16000, 1.1, 0.5, true).enterWeak, true);
-  assert.match(appSource, /Date\.now\(\) - hlsNetworkPlaybackStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS/);
+  assert.match(appSource, /hlsNow\(\) - hlsNetworkPlaybackStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS/);
 });
 
 test("recent download errors prevent stall suppression and recovery", () => {
@@ -675,12 +679,12 @@ test("new HLS session state does not inherit weak counters, stalls, or offline s
     fastRecoverySamples: 0,
     stableRecoverySamples: 0,
     stableRecoveryLastEvidenceAt: 0,
-    lastStallAt: 0,
+    lastStallAt: null,
     stallIncidents: [],
     stallEpisodeActive: false,
     stallEpisodeStartedAt: 0,
     stallEpisodeClassification: "",
-    lastNetworkErrorAt: 0,
+    lastNetworkErrorAt: null,
     lastBandwidthRatio: null,
     wasOffline: false,
     weakEnterTimestamp: 0,
@@ -697,7 +701,12 @@ test("new HLS session state does not inherit weak counters, stalls, or offline s
     requestOverheadBaselineMs: null,
     requestOverheadBaseline: [],
     requestOverheadSamples: 0,
-    lastRequestSampleAt: 0
+    lastRequestSampleAt: 0,
+    requestScope: "", requestKind: "", requestContexts: {}, rttReference: null,
+    rttRecoverySamples: 0, rttRecoveryAt: null, rttRequalification: null, rttEvidenceMaxAgeMs: 6000,
+    mediaTransferAt: null, mediaTransferSerial: 0, mediaEvidenceMaxAgeMs: 6000,
+    recoveryLastSampleAt: null, recoveryNeedsMedia: false, recoveryAfterSerial: 0,
+    recoveryMotion: null, recoveryMotionAt: null
   });
 });
 
@@ -719,13 +728,13 @@ test("stable recovery accepts the real 7.x/8.x full-segment cadence", () => {
     result = recoverySample(state, 1.55, cadence[(sample - 1) % cadence.length], 1000 + sample * 1000);
   }
   assert.equal(result.path, "stable");
-  assert.equal(policy.constants.STABLE_RECOVERY_BUFFER_SECONDS, 7);
+  assert.equal(policy.constants.STABLE_RECOVERY_BUFFER_SECONDS, 6);
 });
 
-test("stable recovery holds 7s evidence through safe full-segment cadence valleys", () => {
+test("stable recovery holds 6s evidence through safe full-segment cadence valleys", () => {
   const state = policy.createState();
   state.lastStallAt = 1000;
-  const cadence = [6.2, 7.5];
+  const cadence = [5.9, 6.5];
   let result;
   for (let sample = 1; sample <= 60; sample += 1) {
     result = recoverySample(state, 1.55, cadence[(sample - 1) % cadence.length], 1000 + sample * 1000);
@@ -751,7 +760,7 @@ test("stable recovery evidence hold has exact 3000ms boundary", () => {
   for (const [gap, expectedSamples] of [[2999, 1], [3000, 1], [3001, 0]]) {
     const state = policy.createState();
     recoverySample(state, 1.55, 7.1, 1000);
-    recoverySample(state, 1.55, 6.1, 1000 + gap);
+    recoverySample(state, 1.55, 5.9, 1000 + gap);
     assert.equal(state.stableRecoverySamples, expectedSamples, `${gap}ms evidence hold`);
   }
 });

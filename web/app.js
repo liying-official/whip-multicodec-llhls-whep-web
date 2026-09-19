@@ -9,6 +9,12 @@
   const hlsButton = document.getElementById("hlsMode");
   const whepButton = document.getElementById("whepMode");
   const HLS_WEAK_POLICY = window.HlsWeakNetworkPolicy;
+  // One monotonic domain for HLS policy, media evidence and cooldowns. The
+  // one-millisecond origin leaves existing zero-valued unset sentinels intact.
+  const hlsNow = () => 1 + performance.now();
+  // Release gate: XHR progress visibility is event-limited, so independent
+  // body-idle cancellation remains disabled. No URL/config override exists.
+  const HLS_BODY_IDLE_RECOVERY_ENABLED = false;
   if (!HLS_WEAK_POLICY) throw new Error("HLS weak-network policy is unavailable");
 
   const HLS_URL = "/live/index.m3u8";
@@ -34,6 +40,13 @@
   const HLS_HARD_RESYNC_MARGIN_SECONDS = 6;
   const HLS_RECOVERY_MIN_BUFFER_SECONDS = 0.75;
   const HLS_STALL_RECOVERY_CONFIRM_MS = 1000;
+  const HLS_SMOOTH = Object.freeze({
+    sampleMs: 200, maxGapMs: 3000, rateRisePerSecond: 0.05,
+    // Exit needs 6s; subsequent catchup must tolerate segment cadence near
+    // the 6s target. 3/4s hysteresis reserves more than a normal 2s segment.
+    brakeBuffer: 3, resumeBuffer: 4, targetTolerance: 0.75,
+    settleMs: 3000, maxGuard: 120, ratePerExcessSecond: 0.02
+  });
   const WHEP_SYNC_CHECK_INTERVAL_MS = 2000;
   const WHEP_SYNC_WARMUP_SAMPLES = 2;
   const WHEP_PLAYOUT_DRIFT_THRESHOLD_SECONDS = 0.25;
@@ -97,6 +110,13 @@
   let hlsIntentionalWeakSeekUntil = 0;
   let hlsConsecutiveNetworkErrors = 0;
   let hlsPendingNetworkRecovery = "";
+  let hlsRecoveryWorkVersion = 0;
+  let hlsSourceRecoveryEpoch = 0;
+  let hlsSourceRecoveryTimer = 0;
+  let hlsRecoveryEpisode = 0;
+  let hlsSmoothRecovery = null;
+  let hlsRequestObserver = null;
+  let hlsRequestProgress = [];
   let whepReconnectTimer = 0;
   let whepReconnectStableTimer = 0;
   let whepReconnectAttempts = 0;
@@ -520,6 +540,136 @@
     return 0;
   }
 
+  // Exit eligibility is about the containing, continuous playable range. A
+  // nearby range across a hole, or a non-finite range, cannot supply reserve.
+  function hlsPlayableBuffer() {
+    const time = Number(video.currentTime);
+    if (!Number.isFinite(time) || time < 0) return 0;
+    for (const range of bufferedRangesSnapshot(video)) {
+      if (Number.isFinite(range.start) && Number.isFinite(range.end) &&
+        range.start >= 0 && range.end >= range.start && time >= range.start && time <= range.end) {
+        return range.end - time;
+      }
+    }
+    return 0;
+  }
+
+  function hlsRecoveryInput(instance) {
+    const bufferAhead = hlsPlayableBuffer();
+    return { now: hlsNow(), bufferAhead,
+      bandwidthRatio: HLS_WEAK_POLICY.bandwidthRatio(Number(instance.bandwidthEstimate),
+        Number(lastStreamMetadata && lastStreamMetadata.bandwidth)),
+      noRecentNetworkErrors: hlsConsecutiveNetworkErrors === 0,
+      paused: video.paused, seeking: video.seeking, online: navigator.onLine,
+      currentTime: Number(video.currentTime), bufferEnd: Number(video.currentTime) + bufferAhead };
+  }
+
+  function setHlsCatchupStatus(reason = "") {
+    hlsButton.textContent = hlsSmoothRecovery && !hlsWeakNetworkMode ? "LL-HLS · 平滑追赶" : "LL-HLS";
+    hlsButton.title = hlsSmoothRecovery && !hlsWeakNetworkMode
+      ? (reason ? `平滑追赶暂缓：${reason}` : "网络已恢复，正在平滑降低直播延迟") : "";
+  }
+
+  function suspendHlsCatchup(reason, preserveNear = false) {
+    const recovery = hlsSmoothRecovery;
+    if (!recovery || recovery.instance !== hls || activeMode !== "hls") return;
+    if (video.playbackRate !== 1) { try { video.playbackRate = 1; } catch (_) {} }
+    recovery.accelerating = false;
+    if (!preserveNear) recovery.nearSince = null;
+    recovery.reason = reason;
+    setHlsCatchupStatus(reason);
+  }
+
+  function prepareHlsCatchup(instance) {
+    // The native latency controller continues measuring, but maxRate=1 makes
+    // this scoped controller the sole rate writer. Install the finite seek
+    // guard BEFORE lowering the target or enabling LL requests. It is fixed
+    // for this recovery chain, never raised by elapsed time or a monitor tick.
+    if (!hlsSmoothRecovery) {
+      const details = instance.latestLevelDetails;
+      const duration = Number(details && details.totalduration);
+      const target = Number(details && details.targetduration);
+      const latency = Number(instance.latency);
+      const usableWindow = details && details.live && Number.isFinite(duration) && duration > 0 &&
+        Number.isFinite(target) && target > 0 && target <= 30 &&
+        Number.isFinite(latency) && latency >= 0 && latency <= duration;
+      const guard = usableWindow ? Math.max(24, Math.min(HLS_SMOOTH.maxGuard, duration + 2 * target)) : 24;
+      hlsSmoothRecovery = { instance, generation, guard, lastAt: hlsNow(),
+        mediaTime: Number(video.currentTime), mediaAdvancedAt: hlsNow(),
+        nearSince: null, accelerating: false, reason: "", peakAt: hlsNow(), peak: hlsPlayableBuffer(), previousPeak: null };
+    }
+    instance.config.liveMaxLatencyDuration = hlsSmoothRecovery.guard;
+    instance.config.maxLiveSyncPlaybackRate = 1;
+    suspendHlsCatchup("");
+  }
+
+  function updateHlsCatchup(instance) {
+    const recovery = hlsSmoothRecovery;
+    if (!recovery || recovery.instance !== instance || instance !== hls ||
+      recovery.generation !== generation || activeMode !== "hls" || hlsWeakNetworkMode) return;
+    const input = hlsRecoveryInput(instance), elapsed = input.now - recovery.lastAt;
+    if (elapsed >= 0 && elapsed < HLS_SMOOTH.sampleMs) return;
+    recovery.lastAt = input.now;
+    if (elapsed < 0 || elapsed > HLS_SMOOTH.maxGapMs) HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+    HLS_WEAK_POLICY.sampleMediaEvidence(hlsWeakPolicyState, input);
+    if (Number.isFinite(input.currentTime) && input.currentTime > recovery.mediaTime + 0.01) {
+      recovery.mediaAdvancedAt = input.now;
+    }
+    recovery.mediaTime = input.currentTime;
+    const latency = Number(instance.latency);
+    const targetDuration = Number(instance.latestLevelDetails && instance.latestLevelDetails.targetduration);
+    // Compare segment-cycle peaks, not the ordinary between-segment sawtooth.
+    const peakWindow = Number.isFinite(targetDuration) && targetDuration > 0 && targetDuration <= 30
+      ? Math.max(4000, 2 * targetDuration * 1000 + 1000) : 6000;
+    recovery.peak = Math.max(recovery.peak, input.bufferAhead);
+    let draining = false;
+    if (input.now - recovery.peakAt >= peakWindow) {
+      draining = recovery.previousPeak !== null && recovery.previousPeak - recovery.peak > peakWindow / 10000 + 0.5;
+      recovery.previousPeak = recovery.peak;
+      recovery.peak = input.bufferAhead;
+      recovery.peakAt = input.now;
+    }
+    let reason = input.paused ? "播放已暂停" : input.seeking ? "正在定位" :
+      input.online === false || hlsWeakPolicyState.wasOffline ? "网络离线" :
+      elapsed > HLS_SMOOTH.maxGapMs || elapsed < 0 ? "采样中断，等待新媒体" :
+      !Number.isFinite(latency) || latency < 0 ? "等待有效延迟" :
+      video.readyState < 3 || input.bufferAhead < HLS_RECOVERY_MIN_BUFFER_SECONDS || draining ? "保留播放缓冲" :
+      input.now - recovery.mediaAdvancedAt > HLS_SMOOTH.maxGapMs ? "等待媒体时钟推进" :
+      !input.noRecentNetworkErrors || !HLS_WEAK_POLICY.recoveryEvidenceFresh(hlsWeakPolicyState, input.now) ? "等待新媒体进展" : "";
+    if (draining) HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+    if (reason) { suspendHlsCatchup(reason); return; }
+    if (latency <= HLS_NORMAL_TARGET_LATENCY_SECONDS + HLS_SMOOTH.targetTolerance) {
+      if (recovery.nearSince === null) recovery.nearSince = input.now;
+      if (input.now - recovery.nearSince >= HLS_SMOOTH.settleMs) {
+        suspendHlsCatchup("");
+        // Actual latency is now safely below 18s. Handoff restores every
+        // normal steady-state value; no fixed grace period can force a seek.
+        instance.config.liveMaxLatencyDuration = 18;
+        instance.config.maxLiveSyncPlaybackRate = HLS_MAX_SYNC_PLAYBACK_RATE;
+        hlsSmoothRecovery = null;
+        hlsLastWeakSafePointAt = 0;
+        hlsRecoveryEpisode += 1;
+        setHlsCatchupStatus();
+        return;
+      }
+    } else recovery.nearSince = null;
+    if (input.bufferAhead < HLS_SMOOTH.brakeBuffer ||
+      (!recovery.accelerating && input.bufferAhead < HLS_SMOOTH.resumeBuffer)) {
+      // A safe cadence valley stops extra consumption, but does not erase
+      // already measured near-target progress or trap a healthy handoff.
+      suspendHlsCatchup("等待缓冲余量", true); return;
+    }
+    recovery.accelerating = true;
+    recovery.reason = "";
+    const desired = 1 + Math.min(HLS_MAX_SYNC_PLAYBACK_RATE - 1,
+      Math.max(0, (latency - HLS_NORMAL_TARGET_LATENCY_SECONDS) * HLS_SMOOTH.ratePerExcessSecond));
+    const current = Number(video.playbackRate);
+    const rate = Math.max(1, Math.min(desired,
+      (Number.isFinite(current) ? current : 1) + HLS_SMOOTH.rateRisePerSecond * elapsed / 1000));
+    if (video.playbackRate !== rate) { try { video.playbackRate = rate; } catch (_) {} }
+    setHlsCatchupStatus();
+  }
+
   function isBufferedTime(media, time) {
     if (!Number.isFinite(time)) return false;
     try {
@@ -555,7 +705,7 @@
       video.seeking ||
       video.ended ||
       video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
-      Date.now() - hlsLastWeakSafePointAt < HLS_WEAK_SAFE_POINT_COOLDOWN_MS
+      (hlsLastWeakSafePointAt > 0 && hlsNow() - hlsLastWeakSafePointAt < HLS_WEAK_SAFE_POINT_COOLDOWN_MS)
     ) {
       return false;
     }
@@ -586,7 +736,7 @@
     }
 
     try {
-      const now = Date.now();
+      const now = hlsNow();
       hlsIntentionalWeakSeekUntil = now + HLS_INTENTIONAL_SEEK_SUPPRESS_MS;
       hlsLastWeakSafePointAt = now;
       hlsStallStartedAt = 0;
@@ -611,7 +761,7 @@
   function updateHlsWeakBufferReadiness(instance) {
     if (instance !== hls || activeMode !== "hls" || !hlsWeakNetworkMode || video.seeking) return;
     const wasReady = hlsWeakPolicyState.weakBufferReady;
-    const bufferAhead = bufferedAheadSeconds(video);
+    const bufferAhead = hlsPlayableBuffer();
     const ready = HLS_WEAK_POLICY.sampleBufferReadiness(hlsWeakPolicyState, bufferAhead);
     if (ready !== wasReady) {
       showStatus(ready
@@ -624,9 +774,12 @@
     clearTimeout(hlsWeakSafePointTimer);
     hlsWeakSafePointTimer = 0;
     let attempts = 0;
+    const episode = hlsRecoveryEpisode;
     const attempt = () => {
+      if (episode !== hlsRecoveryEpisode || instance !== hls || activeMode !== "hls" || !hlsWeakNetworkMode) return;
       hlsWeakSafePointTimer = 0;
-      if (instance !== hls || activeMode !== "hls" || !hlsWeakNetworkMode) return;
+      const path = HLS_WEAK_POLICY.qualifiedRecoveryPath(hlsWeakPolicyState, hlsRecoveryInput(instance));
+      if (path) { applyHlsNetworkProfile(instance, false, "", path); return; }
       updateHlsWeakBufferReadiness(instance);
       if (hlsWeakPolicyState.weakBufferReady) return;
       attempts += 1;
@@ -638,7 +791,21 @@
     hlsWeakSafePointTimer = setTimeout(attempt, 0);
   }
 
+  function cancelHlsSourceRecovery() {
+    hlsSourceRecoveryEpoch += 1;
+    clearTimeout(hlsSourceRecoveryTimer);
+    hlsSourceRecoveryTimer = 0;
+  }
+
   function resetHlsNetworkMonitor() {
+    cancelHlsSourceRecovery();
+    hlsRecoveryWorkVersion += 1;
+    hlsRecoveryEpisode += 1;
+    hlsSmoothRecovery = null;
+    setHlsCatchupStatus();
+    if (hlsRequestObserver) hlsRequestObserver.invalidate();
+    hlsRequestObserver = null;
+    hlsRequestProgress = [];
     clearInterval(hlsNetworkMonitorTimer);
     clearTimeout(hlsWeakSafePointTimer);
     hlsNetworkMonitorTimer = 0;
@@ -654,13 +821,16 @@
   }
 
   function queueHlsNetworkRecovery(mode) {
-    if (mode === "reload" || !hlsPendingNetworkRecovery) {
+    if (!hlsPendingNetworkRecovery || (mode === "reload" && hlsPendingNetworkRecovery !== "reload")) {
       hlsPendingNetworkRecovery = mode;
+      hlsRecoveryWorkVersion += 1;
     }
+    return hlsRecoveryWorkVersion;
   }
 
-  function runPendingHlsNetworkRecovery(myGeneration, instance) {
+  function runPendingHlsNetworkRecovery(myGeneration, instance, workVersion = hlsRecoveryWorkVersion) {
     if (
+      workVersion !== hlsRecoveryWorkVersion ||
       !hlsPendingNetworkRecovery ||
       myGeneration !== generation ||
       activeMode !== "hls" ||
@@ -672,6 +842,7 @@
 
     const mode = hlsPendingNetworkRecovery;
     hlsPendingNetworkRecovery = "";
+    hlsRecoveryWorkVersion += 1;
     const beforeBuffer = bufferedAheadSeconds(video);
     try { instance.startLoad(-1); } catch (_) {}
 
@@ -679,19 +850,27 @@
     // outage, but doing it immediately throws away a still-usable MSE buffer.
     // Give the existing pipeline a chance to resume first; only re-bootstrap
     // if playback is still starved after the network has returned.
-    if (mode === "reload") {
-      schedulePlayerTimeout(() => {
+    if (mode === "reload" && !hlsSourceRecoveryTimer) {
+      // Repeated errors in this same recovery chain must not push the first
+      // starvation deadline into the future. Queue tickets are separate from
+      // this one owned confirmation; exit/teardown still cancel it immediately.
+      const sourceEpoch = hlsSourceRecoveryEpoch;
+      hlsSourceRecoveryTimer = setTimeout(() => {
         if (
+          sourceEpoch !== hlsSourceRecoveryEpoch ||
           myGeneration !== generation ||
           activeMode !== "hls" ||
-          hls !== instance ||
-          navigator.onLine === false
+          hls !== instance
         ) {
           return;
         }
+        cancelHlsSourceRecovery();
+        if (navigator.onLine === false) return;
         const afterBuffer = bufferedAheadSeconds(video);
         const recovered = video.readyState >= 3 || afterBuffer >= Math.max(0.75, beforeBuffer + 0.25);
         if (!recovered) {
+          hlsPendingNetworkRecovery = "";
+          hlsRecoveryWorkVersion += 1;
           try { instance.loadSource(HLS_URL); } catch (_) {}
         }
       }, 2500);
@@ -706,10 +885,25 @@
     const lossUpgrade = weak && hlsWeakNetworkMode && weakClass === "bandwidth-loss" &&
       hlsWeakPolicyState.weakNetworkClass === "rtt";
     if (hlsWeakNetworkMode === weak && !lossUpgrade) return;
+    if (!weak) {
+      // Recheck the *current* range and fresh evidence at the commit boundary.
+      recoveryPath = HLS_WEAK_POLICY.qualifiedRecoveryPath(hlsWeakPolicyState, hlsRecoveryInput(instance));
+      if (!recoveryPath) return;
+      prepareHlsCatchup(instance);
+      cancelHlsSourceRecovery();
+      hlsPendingNetworkRecovery = "";
+      hlsRecoveryWorkVersion += 1;
+      clearTimeout(hlsRecoveryTimer);
+      hlsRecoveryTimer = 0;
+      hlsStallStartedAt = 0;
+    } else suspendHlsCatchup("重新建立弱网缓冲");
+    // A fatal RTT-to-loss upgrade is still this weak episode, including its
+    // existing bounded safe-point attempt and already-spent backtrack budget.
+    if (!lossUpgrade) hlsRecoveryEpisode += 1;
     hlsWeakNetworkMode = weak;
     hlsLowBufferSamples = 0;
     if (weak) {
-      HLS_WEAK_POLICY.markWeakEntry(hlsWeakPolicyState, Date.now(), reason, weakClass);
+      HLS_WEAK_POLICY.markWeakEntry(hlsWeakPolicyState, hlsNow(), reason, weakClass);
     } else {
       HLS_WEAK_POLICY.markWeakRecovery(hlsWeakPolicyState, recoveryPath);
     }
@@ -720,10 +914,10 @@
     // with transport headroom selects complete segments.
     config.lowLatencyMode = profile.lowLatencyMode;
     config.liveSyncDuration = targetLatency;
-    config.liveMaxLatencyDuration = profile.liveMaxLatencyDuration;
+    config.liveMaxLatencyDuration = hlsSmoothRecovery ? hlsSmoothRecovery.guard : profile.liveMaxLatencyDuration;
     config.maxBufferLength = profile.maxBufferLength;
     config.maxMaxBufferLength = profile.maxMaxBufferLength;
-    config.maxLiveSyncPlaybackRate = profile.maxLiveSyncPlaybackRate;
+    config.maxLiveSyncPlaybackRate = hlsSmoothRecovery ? 1 : profile.maxLiveSyncPlaybackRate;
     try {
       // The public setter resets hls.js's accumulated stall latency and marks
       // the new target as an explicit runtime update.
@@ -737,9 +931,10 @@
       clearTimeout(hlsWeakSafePointTimer);
       hlsWeakSafePointTimer = 0;
       hlsIntentionalWeakSeekUntil = 0;
-      hlsLastWeakSafePointAt = 0;
-      const recoveryLabel = recoveryPath === "stable" ? "深缓冲稳定恢复" : "高带宽快速恢复";
-      showStatus(`网络持续稳定（${recoveryLabel}），已恢复低延迟模式 · 目标直播延迟约 ${HLS_NORMAL_TARGET_LATENCY_SECONDS} 秒。`, 3200);
+      // A soft mode transition does not replenish the chain's backtrack budget.
+      clearTimeout(statusTimer);
+      status.classList.remove("show");
+      setHlsCatchupStatus();
     }
   }
 
@@ -758,17 +953,23 @@
         !video.paused &&
         Number(video.currentTime || 0) > 0.5
       ) {
-        hlsNetworkPlaybackStartedAt = Date.now();
+        hlsNetworkPlaybackStartedAt = hlsNow();
       }
-      const bufferAhead = bufferedAheadSeconds(video);
+      updateHlsCatchup(instance);
+      const bufferAhead = hlsWeakNetworkMode || hlsSmoothRecovery ? hlsPlayableBuffer() : bufferedAheadSeconds(video);
+      const progress = hlsRequestObserver ? hlsRequestObserver.poll() : [];
+      // A native abort callback can synchronously replace the player.
+      if (myGeneration !== generation || instance !== hls || activeMode !== "hls") return;
+      hlsRequestProgress = progress;
       const bandwidth = Number(instance.bandwidthEstimate);
       const streamBitrate = Number(lastStreamMetadata && lastStreamMetadata.bandwidth) || 0;
-      const ratio = HLS_WEAK_POLICY.bandwidthRatio(bandwidth, streamBitrate);
+      const ratio = HLS_WEAK_POLICY.mediaEvidenceFresh(hlsWeakPolicyState, hlsNow())
+        ? HLS_WEAK_POLICY.bandwidthRatio(bandwidth, streamBitrate) : null;
       hlsWeakPolicyState.lastBandwidthRatio = ratio;
       const earlyClass = HLS_WEAK_POLICY.sampleNetworkTrend(hlsWeakPolicyState, {
-        now: Date.now(), bufferAhead, bandwidthRatio: ratio,
+        now: hlsNow(), bufferAhead, bandwidthRatio: ratio,
         paused: video.paused || !hlsNetworkPlaybackStartedAt,
-        seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+        seeking: video.seeking || hlsNow() < hlsIntentionalWeakSeekUntil
       });
       if (!hlsWeakNetworkMode && earlyClass) {
         applyHlsNetworkProfile(instance, true, "安全缓冲持续下降或即将耗尽", "", earlyClass);
@@ -776,17 +977,17 @@
       }
       if (hlsWeakNetworkMode) {
         updateHlsWeakBufferReadiness(instance);
-        // Retry on the existing monitor after the bounded startup retry loop.
-        // At most one successful intentional backtrack per weak episode.
-        if (!hlsWeakPolicyState.weakBufferReady && !hlsWeakSafePointTimer) {
-          moveHlsToWeakNetworkSafePoint(instance);
-        }
       }
       if (
         !hlsNetworkPlaybackStartedAt ||
-        Date.now() - hlsNetworkPlaybackStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS ||
-        video.paused || video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+        hlsNow() - hlsNetworkPlaybackStartedAt < HLS_NETWORK_MONITOR_WARMUP_MS ||
+        video.paused || video.seeking || hlsNow() < hlsIntentionalWeakSeekUntil ||
+        navigator.onLine === false || hlsWeakPolicyState.wasOffline
       ) {
+        HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+        if (hlsWeakNetworkMode && !hlsWeakPolicyState.weakBufferReady && !hlsWeakSafePointTimer) {
+          moveHlsToWeakNetworkSafePoint(instance);
+        }
         return;
       }
       const bufferWeak = !video.paused && bufferAhead < HLS_WEAK_LOW_BUFFER_SECONDS;
@@ -819,11 +1020,16 @@
       const recovery = HLS_WEAK_POLICY.sampleRecovery(hlsWeakPolicyState, {
         bandwidthRatio: ratio,
         bufferAhead,
-        noRecentNetworkErrors: hlsConsecutiveNetworkErrors === 0 && hlsWeakPolicyState.weakBufferReady,
-        now: Date.now()
+        noRecentNetworkErrors: hlsConsecutiveNetworkErrors === 0,
+        now: hlsNow(), online: navigator.onLine,
+        currentTime: Number(video.currentTime), bufferEnd: Number(video.currentTime) + bufferAhead
       });
       if (recovery.path) {
         applyHlsNetworkProfile(instance, false, "", recovery.path);
+      }
+      // Decide a fully qualified exit before trying another BUILDING backtrack.
+      if (hlsWeakNetworkMode && !hlsWeakPolicyState.weakBufferReady && !hlsWeakSafePointTimer) {
+        moveHlsToWeakNetworkSafePoint(instance);
       }
     }, HLS_NETWORK_MONITOR_INTERVAL_MS);
   }
@@ -838,18 +1044,21 @@
   }
 
   function markHlsStall() {
+    if (hlsSmoothRecovery) HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+    suspendHlsCatchup("等待播放恢复");
     // A renewed stall invalidates the pending sustained-playing confirmation.
     clearTimeout(hlsRecoveryTimer);
     hlsRecoveryTimer = 0;
-    if (Date.now() < hlsIntentionalWeakSeekUntil) return;
-    const now = Date.now();
+    if (hlsNow() < hlsIntentionalWeakSeekUntil) return;
+    const now = hlsNow();
     if (!hlsStallStartedAt) hlsStallStartedAt = now;
     const pastStartupWarmup = hlsNetworkPlaybackStartedAt &&
       now - hlsNetworkPlaybackStartedAt >= HLS_NETWORK_MONITOR_WARMUP_MS &&
       Number(video.currentTime || 0) > 0.5;
     const stallBandwidth = Number(hls && hls.bandwidthEstimate);
     const streamBitrate = Number(lastStreamMetadata && lastStreamMetadata.bandwidth) || 0;
-    const stallBandwidthRatio = HLS_WEAK_POLICY.bandwidthRatio(stallBandwidth, streamBitrate);
+    const stallBandwidthRatio = HLS_WEAK_POLICY.mediaEvidenceFresh(hlsWeakPolicyState, hlsNow())
+      ? HLS_WEAK_POLICY.bandwidthRatio(stallBandwidth, streamBitrate) : null;
     // Repeated HTMLMediaElement stalls can also come from a temporarily busy
     // decoder (especially AV1 software decode) while transport capacity is
     // clearly healthy. Do not let those events switch an otherwise normal
@@ -868,8 +1077,10 @@
   }
 
   function maybeResyncHlsAfterStall(myGeneration, instance) {
+    const episode = hlsRecoveryEpisode;
     clearTimeout(hlsRecoveryTimer);
     hlsRecoveryTimer = setTimeout(() => {
+      if (episode !== hlsRecoveryEpisode || myGeneration !== generation || instance !== hls) return;
       hlsRecoveryTimer = 0;
       if (
         myGeneration !== generation ||
@@ -906,7 +1117,7 @@
       // target point is already buffered. Seeking only to buffered media avoids
       // trading A/V drift for another starvation event.
       if (
-        !hlsWeakNetworkMode &&
+        !hlsWeakNetworkMode && !hlsSmoothRecovery &&
         excessLatency >= HLS_HARD_RESYNC_MARGIN_SECONDS &&
         bufferAhead >= HLS_RECOVERY_MIN_BUFFER_SECONDS &&
         Number.isFinite(liveSyncPosition) &&
@@ -1982,7 +2193,45 @@
       return;
     }
 
-    const instance = new Hls({
+    let instance;
+    const videoLevels = new Map();
+    let completedMedia = new WeakSet();
+    const mediaVideoCodec = frag => videoLevels.get(Number.isInteger(frag?.level) ? frag.level : 0) || "";
+    const observer = HLS_WEAK_POLICY.createRequestObserver({
+      now: hlsNow,
+      isCurrent: () => myGeneration === generation && instance === hls && activeMode === "hls",
+      onManifestRequest: () => {
+        completedMedia = new WeakSet();
+        videoLevels.clear();
+        observer.invalidate();
+        HLS_WEAK_POLICY.resetRequestContext(hlsWeakPolicyState);
+      },
+      isRelevant: context => context.frag?.type === "main" && Boolean(mediaVideoCodec(context.frag)) &&
+        (!Number.isInteger(instance.currentLevel) || instance.currentLevel < 0 || context.frag.level === instance.currentLevel),
+      onTransfer: (context, now) => HLS_WEAK_POLICY.noteMediaTransfer(hlsWeakPolicyState,
+        { now, duration: (context.part || context.frag).duration }),
+      mediaState: context => {
+        const frag = context.frag;
+        const details = frag && instance.levels?.[frag.level]?.details;
+        const bufferAhead = bufferedAheadSeconds(video);
+        return { duration: frag?.duration, bufferAhead,
+          published: !context.part && Array.isArray(details?.fragments) && details.fragments.includes(frag),
+          needed: Number.isFinite(frag?.start) && Number.isFinite(frag?.duration) &&
+            frag.start <= video.currentTime + bufferAhead + 0.05 && frag.start + frag.duration > video.currentTime,
+          playing: !video.paused && !video.seeking && !video.ended && navigator.onLine !== false &&
+            hlsNow() >= hlsIntentionalWeakSeekUntil };
+      },
+      activeRecovery: HLS_BODY_IDLE_RECOVERY_ENABLED,
+      onIdle: () => {
+        if (myGeneration !== generation || instance !== hls || activeMode !== "hls") return;
+        HLS_WEAK_POLICY.markNetworkError(hlsWeakPolicyState, hlsNow());
+        if (!hlsWeakNetworkMode) applyHlsNetworkProfile(instance, true, "媒体请求持续无字节进展");
+        const workVersion = queueHlsNetworkRecovery("start");
+        schedulePlayerTimeout(() => runPendingHlsNetworkRecovery(myGeneration, instance, workVersion), 250);
+      }
+    });
+    instance = new Hls({
+      ...(Hls.DefaultConfig?.loader ? { loader: observer.wrap(Hls.DefaultConfig.loader) } : {}),
       // Use the pinned library's controller extension point; retain its
       // recovery logic while preventing stale append deadlines from aborting
       // an idle buffer or a newer operation. No global MSE prototype changes.
@@ -2060,6 +2309,7 @@
       maxLiveSyncPlaybackRate: HLS_MAX_SYNC_PLAYBACK_RATE
     });
     hls = instance;
+    hlsRequestObserver = Hls.DefaultConfig?.loader ? observer : null;
     window.__liveHls = instance;
     instance.attachMedia(video);
     instance.loadSource(HLS_URL);
@@ -2074,6 +2324,10 @@
       const codecs = Array.from(new Set(
         (data.levels || []).map(level => level.videoCodec).filter(Boolean)
       ));
+      videoLevels.clear();
+      (data.levels || []).forEach((level, index) => {
+        if (level.videoCodec) videoLevels.set(index, level.videoCodec);
+      });
       const audioCodecs = Array.from(new Set(
         [
           ...(data.levels || []).map(level => level.audioCodec),
@@ -2127,10 +2381,19 @@
       });
     });
 
+    const invalidateEvidence = () => {
+      if (myGeneration === generation && instance === hls) {
+        HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+        suspendHlsCatchup("等待新的播放进展");
+      }
+    };
+    addPlayerVideoListener("timeupdate", () => {
+      if (myGeneration === generation && instance === hls) updateHlsCatchup(instance);
+    });
+    for (const event of ["pause", "seeking", "play", "seeked"]) addPlayerVideoListener(event, invalidateEvidence);
     addPlayerVideoListener("seeked", () => {
       if (myGeneration === generation) updateHlsWeakBufferReadiness(instance);
     });
-
     instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
       if (myGeneration !== generation || instance !== hls) return;
       hlsConsecutiveNetworkErrors = 0;
@@ -2143,20 +2406,27 @@
       const segment = part || (data && data.frag);
       const stats = segment && segment.stats;
       const loading = stats && stats.loading;
-      if (hlsWeakNetworkMode || !data || !data.frag || data.frag.type !== "main" ||
+      if (!data || !data.frag || data.frag.type !== "main" || !mediaVideoCodec(data.frag) ||
         data.frag.sn === "initSegment" || !segment || !Number.isFinite(segment.duration) ||
         !(segment.duration > 0) || !loading || stats.aborted || stats.retry > 0 ||
         !(stats.loaded > 0) || !Number.isFinite(loading.start) ||
         !Number.isFinite(loading.first) || !Number.isFinite(loading.end) ||
-        loading.first < loading.start || loading.end < loading.first) return;
+        loading.first < loading.start || loading.end < loading.first || completedMedia.has(stats) ||
+        (hlsRequestObserver && !observer.accepts(stats, data.frag, part)) ||
+        (Number.isInteger(instance.currentLevel) && instance.currentLevel >= 0 &&
+          Number.isInteger(data.frag.level) && data.frag.level !== instance.currentLevel)) return;
+      completedMedia.add(stats);
+      const requestScope = `${Number.isInteger(data.frag.level) ? data.frag.level : 0}/${Number.isInteger(data.frag.cc) ? data.frag.cc : 0}/${mediaVideoCodec(data.frag)}`;
       const weakClass = HLS_WEAK_POLICY.sampleRequestOverhead(hlsWeakPolicyState, {
-        now: Date.now(), requestOverheadMs: Math.max(0,
+        now: hlsNow(), requestKind: part ? "part" : "whole", requestScope,
+        duration: segment.duration, requestOverheadMs: Math.max(0,
           loading.first - loading.start - (part ? part.duration * 1000 : 0)),
         bandwidthRatio: HLS_WEAK_POLICY.bandwidthRatio(instance.bandwidthEstimate,
           Number(lastStreamMetadata && lastStreamMetadata.bandwidth)),
         bufferAhead: bufferedAheadSeconds(video), paused: video.paused,
-        seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+        seeking: video.seeking || hlsNow() < hlsIntentionalWeakSeekUntil
       });
+      HLS_WEAK_POLICY.noteMediaTransfer(hlsWeakPolicyState, { now: hlsNow(), duration: segment.duration });
       if (weakClass) applyHlsNetworkProfile(instance, true, "持续高请求开销", "", weakClass);
     });
 
@@ -2164,6 +2434,10 @@
     instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
       if (myGeneration !== generation) return;
       const level = instance.levels && instance.levels[data.level];
+      if (level) {
+        if (level.videoCodec) videoLevels.set(data.level, level.videoCodec);
+        else videoLevels.delete(data.level);
+      }
       if (level && level.videoCodec) {
         setDetectedCodec(level.videoCodec);
         const metadata = {
@@ -2181,6 +2455,10 @@
 
     instance.on(Hls.Events.ERROR, (_event, data) => {
       if (myGeneration !== generation || !data) return;
+      if (hlsSmoothRecovery) {
+        HLS_WEAK_POLICY.invalidateRecovery(hlsWeakPolicyState);
+        suspendHlsCatchup("等待错误恢复后的新媒体");
+      }
       const details = String(data.details || "未知错误");
       const httpStatus = Number(data.response && data.response.code) || 0;
       const responseCode = httpStatus
@@ -2197,13 +2475,13 @@
         // other non-fatal errors keep the existing classification path.
         // Successful fragments reset only the consecutive retry counter; the
         // timestamp remains until the real network-health quiet window passes.
-        HLS_WEAK_POLICY.markNetworkError(hlsWeakPolicyState, Date.now());
+        HLS_WEAK_POLICY.markNetworkError(hlsWeakPolicyState, hlsNow());
         hlsConsecutiveNetworkErrors += 1;
         if (!hlsWeakNetworkMode && HLS_WEAK_POLICY.shouldProtectPlaylistBuffer({
           details, fatal: data.fatal, bufferAhead: bufferedAheadSeconds(video),
-          playbackAgeMs: hlsNetworkPlaybackStartedAt ? Date.now() - hlsNetworkPlaybackStartedAt : 0,
+          playbackAgeMs: hlsNetworkPlaybackStartedAt ? hlsNow() - hlsNetworkPlaybackStartedAt : 0,
           paused: video.paused,
-          seeking: video.seeking || Date.now() < hlsIntentionalWeakSeekUntil
+          seeking: video.seeking || hlsNow() < hlsIntentionalWeakSeekUntil
         })) {
           // Retain the current MSE buffers and let hls.js finish its own retry.
           // The existing bounded safe-point operation supplies reserve before
@@ -2217,9 +2495,9 @@
         details === "playlistUnchangedError"
       ) {
         showStatus("直播清单持续未更新，正在重新同步最新媒体…", 0);
-        queueHlsNetworkRecovery("reload");
+        const workVersion = queueHlsNetworkRecovery("reload");
         schedulePlayerTimeout(() => {
-          runPendingHlsNetworkRecovery(myGeneration, instance);
+          runPendingHlsNetworkRecovery(myGeneration, instance, workVersion);
         }, 250);
         return;
       }
@@ -2309,9 +2587,9 @@
           `HLS 网络错误：${details}${responseCode}，约 ${Math.ceil(retryDelay / 1000)} 秒后恢复…`,
           0
         );
-        queueHlsNetworkRecovery(/manifest|level/i.test(details) ? "reload" : "start");
+        const workVersion = queueHlsNetworkRecovery(/manifest|level/i.test(details) ? "reload" : "start");
         schedulePlayerTimeout(() => {
-          runPendingHlsNetworkRecovery(myGeneration, instance);
+          runPendingHlsNetworkRecovery(myGeneration, instance, workVersion);
         }, retryDelay);
         return;
       }
@@ -2499,6 +2777,7 @@
   window.addEventListener("offline", () => {
     if (activeMode === "hls") {
       HLS_WEAK_POLICY.markOffline(hlsWeakPolicyState);
+      suspendHlsCatchup("网络离线");
       showStatus("网络连接已中断，播放器将保留现有缓冲并等待恢复…", 0);
     } else if (activeMode === "whep") {
       showStatus("网络连接已中断，WebRTC 将在网络恢复后自动重连…", 0);
@@ -2561,11 +2840,24 @@
     get network() {
       return {
         hlsWeakNetworkMode,
+        hlsSmoothCatchup: Boolean(hlsSmoothRecovery && !hlsWeakNetworkMode),
+        hlsCatchupReason: hlsSmoothRecovery ? hlsSmoothRecovery.reason : "",
+        hlsCatchupGuardSeconds: hlsSmoothRecovery ? hlsSmoothRecovery.guard : null,
         hlsWeakNetworkClass: hlsWeakPolicyState.weakNetworkClass,
         hlsWeakBufferReady: hlsWeakPolicyState.weakBufferReady,
         hlsBufferSlope: hlsWeakPolicyState.bufferSlope,
         hlsRequestOverheadMs: hlsWeakPolicyState.requestOverheadMs,
         hlsRequestOverheadBaselineMs: hlsWeakPolicyState.requestOverheadBaselineMs,
+        hlsRttRecoverySamples: hlsWeakPolicyState.rttRecoverySamples,
+        hlsRttRequalification: hlsWeakPolicyState.rttRequalification ? {
+          phase: hlsWeakPolicyState.rttRequalification.phase,
+          samples: hlsWeakPolicyState.rttRequalification.values.length,
+          validated: hlsWeakPolicyState.rttRequalification.validated
+        } : null,
+        hlsRequestObservation: hlsRequestObserver ? hlsRequestObserver.snapshot() : null,
+        hlsRequestProgress: hlsRequestProgress.map(row => ({ ...row })),
+        hlsMediaEvidenceFresh: HLS_WEAK_POLICY.mediaEvidenceFresh(hlsWeakPolicyState, hlsNow()),
+        hlsMediaEvidenceAgeMs: hlsWeakPolicyState.mediaTransferAt === null ? null : Math.max(0, hlsNow() - hlsWeakPolicyState.mediaTransferAt),
         hlsLowBufferSamples,
         hlsLowBandwidthSamples: hlsWeakPolicyState.lowBandwidthSamples,
         hlsHealthySamples: hlsWeakPolicyState.fastRecoverySamples,
