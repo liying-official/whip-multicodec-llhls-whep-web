@@ -1,10 +1,12 @@
-# OBS WHIP Multi-Codec LL-HLS/WHEP Edge
+# WHIP Multi-Codec LL-HLS/WHEP Streaming Service
 
 English | [简体中文](README.md)
 
-A low-latency, zero-video-transcoding streaming service. OBS
-publishes over WHIP or RTMP from a trusted LAN, while browsers play over public
+A low-latency, zero-video-transcoding streaming service. Compatible publishing clients
+publish over WHIP or RTMP from a trusted LAN, while browsers play over public
 TLS 1.3 using LL-HLS or WHEP/WebRTC.
+The project accepts clients that meet its protocol, codec and authentication requirements;
+it is not tied to a particular publishing application.
 
 Current release: **v1.35**
 
@@ -37,7 +39,7 @@ v1.35 pins:
 ## Data path
 
 ```text
-OBS
+Publishing client
  ├─ WHIP / WebRTC ─┐
  └─ RTMP ──────────┤
                     ▼
@@ -48,7 +50,7 @@ OBS
 ```
 
 The server does not transcode video. The viewer must support the codec produced
-by OBS; H.264 normally provides the widest compatibility. AOM AV1 requires a
+by the publisher; H.264 normally provides the widest compatibility. AOM AV1 requires a
 real keyframe interval of 1–2 seconds and must not use `0/automatic`.
 
 ## Quick deployment
@@ -215,7 +217,7 @@ For rotation, `sudo ./stop.sh --clear-credentials` safely stops the current unit
 then removes old credentials. Start service mode again with
 `sudo systemctl start obs-whip-live.service` to generate new credentials.
 
-## OBS settings
+## Recommended OBS settings (optional client)
 
 WHIP (recommended):
 
@@ -252,8 +254,8 @@ supplies AAC, which requires manual LL-HLS selection to retain audio.
 | TCP/443 | HTTPS, HTTP/1.1, HTTP/2 | Public |
 | UDP/443 | HTTP/3 / QUIC | Public |
 | UDP/TCP 8189 | Encrypted WHEP WebRTC media | Public when WHEP is used |
-| TCP/8889 | OBS WHIP signaling | Trusted LAN |
-| TCP/1935 | OBS RTMP compatibility input | Trusted LAN |
+| TCP/8889 | WHIP publishing signaling | Trusted LAN |
+| TCP/1935 | RTMP compatibility input | Trusted LAN |
 | TCP/8080, 8888, 9998 | Internal gateway, HLS, metrics | Loopback only |
 
 For a non-standard public HTTPS port, map the same public TCP and UDP port to
@@ -323,7 +325,7 @@ Private, loopback, or link-local real IPv4 sources may additionally receive the 
 ## Documentation
 
 - [Detailed deployment and operation guide (Chinese)](README.txt)
-- [OBS encoder compatibility](OBS-COMPATIBILITY.txt)
+- [Recommended OBS settings](OBS-COMPATIBILITY.txt)
 - [Codec and transport support](CODEC-SUPPORT.txt)
 - [Security model](SECURITY.txt)
 - [Firewall and port policy](FIREWALL.txt)
@@ -341,7 +343,7 @@ excluded from the public repository and release assets.
 - `web/`: HTML, CSS, native JavaScript player, and pinned hls.js asset
 - `patches/`: reproducible MediaMTX and gortmplib compatibility patches
 - `third_party/`: licenses, versions, module graph, and build records
-- `tools/`: OBS/libdatachannel behavior simulators and regression tools
+- `tools/`: WHIP/libdatachannel publishing simulators and regression tools
 
 Prebuilt Linux binaries are intentionally excluded from Git history and are
 published only through Releases. Project-owned code is licensed under the

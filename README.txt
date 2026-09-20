@@ -1,10 +1,11 @@
-OBS WHIP 多编码 LL-HLS/WHEP 直播边缘
+WHIP 多编码 LL-HLS/WHEP 直播服务
 -----------------------------
 
 English: README.en.md | 简体中文: README.md
 
-低延迟、零视频转码直播服务。OBS 通过可信局域网使用
+低延迟、零视频转码直播服务。兼容的推流客户端通过可信局域网使用
 WHIP 或 RTMP 发布，浏览器通过公网 TLS 1.3 使用 LL-HLS 或 WHEP/WebRTC 播放。
+项目不限定推流软件；客户端需满足协议、编码及认证要求。
 
 当前版本：v1.35
 
@@ -37,7 +38,7 @@ v1.35 固定使用：
 
 数据链路
 --------
-OBS
+推流客户端
  ├─ WHIP / WebRTC ─┐
  └─ RTMP ──────────┤
                     ▼
@@ -46,7 +47,7 @@ OBS
             └─ WHEP signaling ─ secure gateway ── Caddy ── Browser
                  WebRTC media (DTLS-SRTP) ─────────────── Browser
 
-服务器不转码。浏览器必须能够解码 OBS 当前输出的编码；H.264 通常具有最广泛的
+服务器不转码。浏览器必须能够解码推流端当前输出的编码；H.264 通常具有最广泛的
 兼容性。AOM AV1 的关键帧间隔必须设置为 1～2 秒，不能使用 0/自动。
 
 快速部署
@@ -177,7 +178,7 @@ status.sh / diagnose.sh 在核心进程、必需监听、TLS/Caddy 或公网 ICE
 主动轮换使用 sudo ./stop.sh --clear-credentials，它会先安全停止当前 unit，再删除旧凭据。
 服务模式随后用 sudo systemctl start obs-whip-live.service 启动并生成新凭据。
 
-OBS 参数
+OBS 配置推荐（可选客户端）
 --------
 
 WHIP（推荐）：
@@ -209,8 +210,8 @@ HTTPS 域名及公网端口。WHEP 媒体单独通过 8189 传输，不经过 HT
 | TCP/443 | HTTPS、HTTP/1.1、HTTP/2 | 公网 |
 | UDP/443 | HTTP/3 / QUIC | 公网 |
 | UDP/TCP 8189 | WHEP WebRTC 加密媒体 | 使用 WHEP 时公网 |
-| TCP/8889 | OBS WHIP 信令 | 可信局域网 |
-| TCP/1935 | OBS RTMP 兼容推流 | 可信局域网 |
+| TCP/8889 | WHIP 推流信令 | 可信局域网 |
+| TCP/1935 | RTMP 兼容推流 | 可信局域网 |
 | TCP/8080、8888、9998 | 内部网关、HLS、指标 | 仅 loopback |
 
 如果公网使用非标准 HTTPS 端口，必须把同一个公网 TCP/UDP 端口映射到服务器
@@ -273,7 +274,7 @@ WHIP_IP 候选。其他公网地址、IPv6、mDNS 和畸形候选不会返回。
 --------
 
 - 完整部署与运行说明（README.txt）
-- OBS 编码器兼容参数（OBS-COMPATIBILITY.txt）
+- OBS 配置推荐（OBS-COMPATIBILITY.txt）
 - 编码与传输能力（CODEC-SUPPORT.txt）
 - 安全模型（SECURITY.txt）
 - 防火墙与端口（FIREWALL.txt）
@@ -292,7 +293,7 @@ https://github.com/liying-official/whip-multicodec-llhls-whep-web/blob/main/CHAN
 - web/：HTML、CSS、原生 JavaScript 播放器及固定版本 hls.js
 - patches/：MediaMTX 与 gortmplib 的可复现兼容补丁
 - third_party/：第三方许可证、版本、模块图和构建记录
-- tools/：OBS/libdatachannel 行为模拟与回归测试工具
+- tools/：WHIP/libdatachannel 推流行为模拟与回归测试工具
 
 预编译 Linux 二进制不提交到 Git 历史，只通过 Releases 提供。项目自有代码使用
 MIT License（LICENSE）；第三方组件许可证保存在 third_party/。

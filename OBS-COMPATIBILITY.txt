@@ -1,12 +1,14 @@
-OBS 编码与推流配置 / OBS encoding and publishing
+OBS 配置推荐（可选客户端） / Recommended OBS settings (optional client)
 ================================================
 项目版本 / Project version: v1.35
 
 中文
 ----
 
+本文件仅提供选择 OBS 时的配置推荐。项目也接受符合协议、编码及认证要求的其他推流客户端。
+
 发布地址与来源
-<LAN_IP> 是服务器监听 OBS 流量的私网 IPv4，不是 PUBLIC_DOMAIN。WHIP TCP/8889
+<LAN_IP> 是服务器监听推流流量的私网 IPv4，不是 PUBLIC_DOMAIN。WHIP TCP/8889
 和 RTMP TCP/1935 仅绑定该地址；发布同时检查密码、所选接口真实局域网段及本机
 /32。WHIP_IP 留空时优先自动选择默认路由的已启用 RFC1918 网卡，多网卡时可
 指定某个本机私网地址。INGEST_ALLOW_CIDRS 手工值不会扩大范围；在防火墙中
@@ -28,7 +30,7 @@ WHIP
 
 本项目的 WebRTC 轨道收集期限是 15 秒，允许软件编码器较慢的初始化。
 HTTP WHIP 信令及其中的凭据是明文，仅用于所选可信局域网；媒体通过 UDP/TCP
-8189 的 DTLS-SRTP 加密通道传输。公网播放域名不作为 OBS 发布入口。
+8189 的 DTLS-SRTP 加密通道传输。公网播放域名不作为推流入口。
 
 建议先使用单路视频、整数帧率和明确的关键帧间隔：
   帧率：24/25/30/50/60 FPS 等
@@ -128,8 +130,11 @@ SourceBuffer append 归属保护、网络错误触发及恢复条件完整说明
 English
 -------
 
+This guide provides recommended settings when using OBS. Other publishing clients
+that meet the protocol, codec and authentication requirements are also supported.
+
 Publishing address and sources
-<LAN_IP> is the server's private IPv4 listener for OBS, not PUBLIC_DOMAIN. WHIP
+<LAN_IP> is the server's private IPv4 publishing listener, not PUBLIC_DOMAIN. WHIP
 TCP/8889 and RTMP TCP/1935 bind only there. Publishing checks the password and the
 selected interface's actual LAN subnet plus the server /32 address. An empty
 WHIP_IP prefers an active RFC1918 interface associated with the default route;
@@ -156,7 +161,7 @@ WHIP
 The project's WebRTC track-gather deadline is 15 seconds, allowing slower encoder
 initialization. HTTP WHIP signalling and its credentials are plaintext and belong
 only on the selected trusted LAN. Media uses DTLS-SRTP on UDP/TCP 8189. The public
-viewer hostname is not an OBS publishing endpoint.
+viewer hostname is not a publishing endpoint.
 
 Start with one video stream, an integer frame rate and an explicit keyframe interval:
   Frame rate:         24/25/30/50/60 FPS, for example

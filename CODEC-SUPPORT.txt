@@ -41,7 +41,7 @@ WHEP 可能只有画面，使用兼容的 HLS/MSE 播放路径才能保留 AAC �
 加本机 /32；该检查以服务器看到的源 IP 为准，不能识别被 NAT/代理改写的原始
 外部来源。公网网页不代理 WHIP 发布。WHEP 信令走 HTTPS，媒体走 UDP/TCP 8189
 的 ICE/DTLS-SRTP 通道，不扩大发布权限。详细端口、IPv4 ICE 白名单和 NAT 要求
-见 DNS-SETUP.txt、FIREWALL.txt；OBS 参数见 OBS-COMPATIBILITY.txt。
+见 DNS-SETUP.txt、FIREWALL.txt；OBS 配置推荐见 OBS-COMPATIBILITY.txt。
 
   AUTO                    有 RTCPeerConnection 时优先尝试 WHEP，否则使用 HLS
   AV1/VP9 + AAC           兼容 MSE 时可手动 LL-HLS 保留声音
@@ -63,12 +63,12 @@ MediaMTX 兼容行为
 - VP9 原样路由；WHEP 用 VP9/90000 协商，LL-HLS 用实际 vp09 codec string 检查
   MSE/MediaCapabilities。
 - RTMP 可接收不适合 WebRTC 的重排/时间戳结构，但不会让该结构自动兼容 WHEP，
-  也不能解决 OBS 编码队列超时或浏览器持续解码问题。
+  也不能解决推流端编码队列超时或浏览器持续解码问题。
 
 LL-HLS 与弱网模式
 服务端保留 24 个媒体段，目标媒体段 2 秒、CMAF part 1 秒；实际切段受关键帧和
 时间戳影响。1 秒 part 适配 24/25/30/50/60 等整数帧率的整帧周期。
-播放器参数独立于 OBS 编码参数：
+播放器参数独立于推流端编码参数：
 
   模式              lowLatencyMode   目标延迟   buffer 上限*  最大播放速率
   Normal            true             6 秒       10/15 秒      1.05x
@@ -96,7 +96,7 @@ HLS.js 原始资源通过 bufferController 扩展获得 SourceBuffer append 超�
 直播已播放至少 8 秒、音频/视频清单发生非致命超时且实际前向缓冲低于 6 秒时，
 立即进入既有 bandwidth-loss 保护，停止加速并尝试一次有界安全回退。保护可能产生
 短暂 seek、内容回退或卡顿；持续带宽低于流码率或长时间断网仍可能停播。该策略
-不转码、不降低 OBS 码率，也不修复路由器/NAT 的 TCP 重传。
+不转码、不降低推流端码率，也不修复路由器/NAT 的 TCP 重传。
 
 验证边界
 必须观察实际 currentTime、连续缓冲、解码帧和音视频表现。FRAG_BUFFERED 或
@@ -147,7 +147,7 @@ as seen by the server; NAT/proxy source rewriting can hide the original external
 source. The public site does not proxy WHIP publishing. WHEP signalling uses HTTPS;
 media uses ICE/DTLS-SRTP on UDP/TCP 8189 without expanding publishing permissions.
 See DNS-SETUP.txt and FIREWALL.txt for ports, the IPv4 ICE allowlist and NAT;
-see OBS-COMPATIBILITY.txt for encoder settings.
+see OBS-COMPATIBILITY.txt for optional OBS configuration recommendations.
 
   AUTO                    WHEP first if RTCPeerConnection exists; HLS otherwise
   AV1/VP9 + AAC           Manual LL-HLS can preserve audio if MSE supports it
@@ -173,14 +173,14 @@ MediaMTX compatibility behavior
 - VP9 is routed without conversion. WHEP negotiates VP9/90000; LL-HLS tests the
   actual vp09 codec string through MSE/MediaCapabilities.
 - RTMP can accept reordering/timestamp structures unsuitable for WebRTC. It does
-  not make those structures compatible with WHEP or fix OBS encoder queue
+  not make those structures compatible with WHEP or fix publisher encoder queue
   timeouts or browser decoding continuity.
 
 LL-HLS and weak-network mode
 The server retains 24 media segments with a 2-second segment target and 1-second
 CMAF part target. Actual segmentation depends on keyframes and timestamps.
 One-second parts align with integer frame periods at 24/25/30/50/60 FPS.
-Player profiles are independent of OBS encoding settings:
+Player profiles are independent of publisher encoding settings:
 
   Profile           lowLatencyMode       Target delay  Buffer limits*  Max rate
   Normal            true                 6 s           10/15 s         1.05x
@@ -218,7 +218,7 @@ with actual forward buffer below 6 seconds immediately activates bandwidth-loss
 protection, stops acceleration and attempts one bounded safe backtrack. Protection
 can cause a short seek, replayed content or a stall. Sustained bandwidth below the
 stream bitrate or a long outage can still stop playback. This policy does not
-transcode, lower the OBS bitrate or repair router/NAT TCP retransmissions.
+transcode, lower the publishing bitrate or repair router/NAT TCP retransmissions.
 
 Verification boundary
 Observe currentTime, continuous buffered ranges, decoded frames and actual audio/

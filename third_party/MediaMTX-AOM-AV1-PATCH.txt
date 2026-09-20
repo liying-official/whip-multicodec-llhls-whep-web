@@ -43,7 +43,7 @@ Compatibility behavior retained:
      the supplied payload. Normalize base-layer extension headers, reject
      invalid header/extension bits and enhancement layers, and filter temporal
      delimiters. Retain the narrowly matched libdatachannel missing-base-header
-     compatibility form used by the existing OBS/AOM path.
+     compatibility form used by the existing AOM sender path.
   3. Cache a successfully parsed sequence header and restore it only before
      an actual KEY_FRAME if the sender omitted it. Do not prepend it to inter
      frames or show-existing-frame units. gohlslib v2.4.4 and mediacommon v2.9.4
@@ -109,7 +109,7 @@ RTP and security regression fixture:
   keeping its +2 missing-sequence assertion.
 
 Encoder requirement:
-  HLS/CMAF still needs real random-access frames; keep the existing OBS keyframe
+  HLS/CMAF still needs real random-access frames; keep the existing encoder keyframe
   interval of 1-2 seconds. The server does not transcode or create key frames.
 
 Provenance and current validation (2026-09-12):
@@ -186,7 +186,7 @@ Licenses:
      到达后再配置轨道。变更只作用于 AV1；非空但损坏的 AV1 配置仍拒绝，
      上游 H264/H265 参数检查保持完整。
   2. 仅当 LEB128 长度与实际载荷完全相等时归一化 AV1 OBU 内部长度；归一化基础层
-     扩展头，拒绝非法头/扩展位和增强层，并过滤时间分隔符。保留现有 OBS/AOM
+     扩展头，拒绝非法头/扩展位和增强层，并过滤时间分隔符。保留现有 AOM 推流
      路径使用的、严格匹配的 libdatachannel 缺基础头兼容格式。
   3. 缓存成功解析的序列头；仅当发送方省略序列头且单元确为 KEY_FRAME 时补回。
      不对帧间帧或 show-existing-frame 单元前置序列头。当前 gohlslib 和
@@ -229,7 +229,7 @@ RTP 与安全回归样本：
   继续检查 +2 缺失序列断言。
 
 编码器要求：
-  HLS/CMAF 仍需真实随机访问帧；OBS 关键帧间隔保持 1–2 秒。服务端不转码，
+  HLS/CMAF 仍需真实随机访问帧；编码器关键帧间隔保持 1–2 秒。服务端不转码，
   也不会生成关键帧。
 
 来源与验证记录（2026-09-12）：

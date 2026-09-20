@@ -29,8 +29,8 @@
   UDP/443   HTTP/3 / QUIC，仅 TLS 1.3
   UDP/8189  WebRTC DTLS-SRTP 加密媒体，首选
   TCP/8189  WebRTC 加密媒体回退
-  TCP/8889  仅所选可信局域网：OBS WHIP 信令
-  TCP/1935  仅所选可信局域网：OBS RTMP
+  TCP/8889  仅所选可信局域网：WHIP 信令
+  TCP/1935  仅所选可信局域网：RTMP
 
 start.sh 的 PUBLIC_HTTPS_PORT 内置默认是 443，实际使用 config.env 的设置。
 若公网端口不是 443，分别配置同协议映射：
@@ -42,7 +42,7 @@ HTTP/1.1/2，但无法使用 HTTP/3。
 
 公网 WHEP 还需把 UDP/8189、TCP/8189 按原端口转发至服务器。8189 是经过 ICE/
 DTLS 协商的媒体端口，不是发布信令接口；WHIP 推流也使用该媒体端口。仅向公网
-提供 LL-HLS 时可以不向公网开放 8189，局域网 OBS 所需媒体访问仍应保留。
+提供 LL-HLS 时可以不向公网开放 8189，局域网推流客户端所需媒体访问仍应保留。
 当前公网 WHEP ICE 白名单仅公告 PUBLIC_HOST 的合格 IPv4，不能通过只开放
 IPv6/8189 来提供公网 IPv6 WHEP 媒体路径。
 
@@ -125,8 +125,8 @@ Local server listeners:
   UDP/443   HTTP/3 / QUIC, TLS 1.3 only
   UDP/8189  WebRTC DTLS-SRTP encrypted media, preferred
   TCP/8189  WebRTC encrypted media fallback
-  TCP/8889  OBS WHIP signalling, selected trusted LAN only
-  TCP/1935  OBS RTMP, selected trusted LAN only
+  TCP/8889  WHIP signalling, selected trusted LAN only
+  TCP/1935  RTMP, selected trusted LAN only
 
 The built-in PUBLIC_HTTPS_PORT default in start.sh is 443; config.env controls the
 effective value. For a nonstandard public port, map each protocol separately:
@@ -140,7 +140,7 @@ Public WHEP additionally needs UDP/8189 and TCP/8189 forwarded without changing
 the port number. Port 8189 carries ICE/DTLS-negotiated media, not publishing
 signalling. WHIP ingest uses this media port too. For public HLS-only viewing,
 8189 may remain closed to the Internet while retaining the media access needed by
-LAN OBS. Public WHEP ICE advertises only approved PUBLIC_HOST IPv4 addresses;
+LAN publishing clients. Public WHEP ICE advertises only approved PUBLIC_HOST IPv4 addresses;
 opening IPv6/8189 alone does not provide a public IPv6 WHEP media path.
 
 Publishing sources
